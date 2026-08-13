@@ -1,0 +1,19 @@
+[
+  {
+    "type": "invite_ticket_issue",
+    "store_code": "JD2401010001",
+    "store_name": "新型金泉广场店",
+    "quantity_per_phone": 60,
+    "phones": ["13800138000", "13900139000"]
+  },
+  {
+    "type": "coupon_store_scope",
+    "coupon_template_id": "CT20250521000001",
+    "stores": [
+      {
+        "store_code": "JD2401010001",
+        "store_name": "新型金泉广场店"
+      }
+    ]
+  }
+]
