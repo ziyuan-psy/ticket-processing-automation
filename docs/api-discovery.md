@@ -152,6 +152,61 @@ GET  /member/getMemberIdImportResult?key=...
 GET  /manualActivity/getShopMemberExcelCount?activityNo=...
 ```
 
+Focused capture `captures/invite-mobile-import-20260814-120300.ndjson` confirmed the imported-phone branch:
+
+```text
+POST https://marketingadmin.cotticoffee.com/member/importExcelForManualActivity?autoRegister=true
+GET  https://marketingadmin.cotticoffee.com/member/getImportResult?key=...
+```
+
+The upload is `multipart/form-data` with a single Excel file field named `file`. The UI template for phone import uses column B:
+
+```text
+B1 = 手机号码（必填）
+B2... = one phone number per row
+```
+
+Observed upload response:
+
+```json
+{
+  "status": 0,
+  "data": "82387329-4cbc-4880-8d87-59f969c2381f-1786680379667"
+}
+```
+
+Observed import-result response for an Excel with 2 phone numbers:
+
+```json
+{
+  "status": 0,
+  "data": {
+    "allCount": 2,
+    "failedCount": 0,
+    "noRegisterCount": 0,
+    "status": 1,
+    "successExcelUrl": "..."
+  }
+}
+```
+
+For `POST /manualActivity/djSave`, imported-phone targeting should use:
+
+```json
+{
+  "putPeopleType": 2,
+  "importMobileSuccessKey": "<upload response data>",
+  "excelKey": "<same upload response data>",
+  "memberSaveParamList": [],
+  "memberVOList": [],
+  "excelUrl": {
+    "successExcelUrl": "...",
+    "failedExcelUrl": "",
+    "noRegisterExcelUrl": ""
+  }
+}
+```
+
 Likely payload fields for `POST /manualActivity/djSave`:
 
 ```json

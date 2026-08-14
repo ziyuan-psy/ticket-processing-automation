@@ -33,13 +33,11 @@
 
 ### LLM 处理
 
-LLM 负责理解工单和 SOP 规则，但不直接绕过脚本写入中台。
+LLM 不再负责固定格式招待券工单的字段提取。LLM 主要负责解释异常、协助改脚本、总结结果，不直接绕过脚本写入中台。
 
-- 从自然语言工单中识别门店名、门店编号、手机号、发券数量。
-- 判断这是招待券发放任务，而不是优惠券适用门店维护等其他任务。
-- 根据 SOP 生成活动名称，例如 `华熙国际中心C座B2店-招待*15`。
-- 判断固定券模板应使用 `CT20250521000001`。
-- 检查数量上限、手机号格式、门店编号格式。
+- 解释脚本 dry-run 输出和中台接口返回。
+- 在接口变化、字段缺失或脚本 fallback 报错时协助定位原因。
+- 根据新的人工操作抓包结果更新脚本。
 - 阅读脚本输出，解释接口返回结果。
 - 在人工确认后，选择执行提交脚本。
 
@@ -49,27 +47,36 @@ LLM 负责理解工单和 SOP 规则，但不直接绕过脚本写入中台。
 
 `scripts/invite-ticket-dry-run.mjs` 负责提交前预览，只调用查询接口，不调用保存接口：
 
+- 从固定格式工单文本中提取门店名、门店编号、手机号、发券数量。
+- 自动生成活动名称，例如 `华熙国际中心C座B2店-招待*15`。
+- 固定使用招待券模板 `CT20250521000001`。
+- 校验手机号格式、门店编号格式、单手机号发券数量上限。
+- 单手机号发券数量 `101-200` 时拆成两次提交 payload。
 - 通过 Chrome DevTools Protocol 连接当前已登录 Chrome。
 - 在 `marketingweb.yummy.tech` 页面上下文中复用当前登录态。
 - 查询可复制的手工发券活动：`POST /activity/page`
 - 查询活动详情：`POST /manualActivity/detail`
 - 查询固定券模板：`GET /coupon/djpage`
 - 查询并核对门店：`POST /crowd/shop/list`
-- 查询手机号对应会员：`GET /member/djpage`
-- 生成待提交 payload。
+- 门店名称和门店编号必须同时匹配；不匹配时停止并在 `returnComment` 返回退回批示语：`门店名称和门店编号不一致，请重新填写`；搜不到门店时仍停止并报错。
+- 统一生成手机号 Excel 并上传：`POST /member/importExcelForManualActivity?autoRegister=true`
+- 查看手机号导入结果：`GET /member/getImportResult?key=...`
+- 校验导入总条数与手机号数量一致，且错误数/非会员数为 0。
+- 生成一个或多个待提交 payload。
 - 将 dry-run 结果写入本地 JSON。
 - 明确停止在提交前，不调用 `POST /manualActivity/djSave`。
 
 `scripts/invite-ticket-submit.mjs` 负责真实提交：
 
 - 读取 dry-run JSON。
-- 校验 `payload.id === null`，确保是新建活动，不是修改旧活动。
-- 校验 `activityType === 202`。
-- 校验 `couponTemplateSaveParamList` 和 `memberSaveParamList` 存在。
-- 校验单人数量和总量不超过 SOP 限制。
+- 校验每个 payload 的 `id === null`，确保是新建活动，不是修改旧活动。
+- 校验 `activityType === 202`、`channel === 1`。
+- 校验 `couponTemplateSaveParamList` 存在且单次 `sendNums <= 100`。
+- 导入手机号模式校验 `putPeopleType === 2`、`importMobileSuccessKey` 和 `excelKey` 一致。
 - 必须显式传入 `--confirm-submit` 才会提交。
-- 只调用一次 `POST /manualActivity/djSave`。
-- 保存中台返回结果到本地 JSON。
+- 对 dry-run 生成的每个 payload 顺序调用 `POST /manualActivity/djSave`。
+- 提交成功后按活动名只读查询 `POST /activity/page`，将新建活动 ID、活动编号、状态等复查结果写入 `results[].postCheck`。
+- 保存中台返回结果和提交后复查结果到本地 JSON。
 
 ### 人工 Review
 
@@ -81,9 +88,9 @@ LLM 负责理解工单和 SOP 规则，但不直接绕过脚本写入中台。
 - 门店编号和门店名称是否匹配。
 - 门店是否属于联营、状态是否正常。
 - 手机号是否正确。
-- 会员查询结果是否匹配该手机号。
 - 券模板是否是当前固定招待券模板。
-- 单个手机号发券数量和总量是否符合 SOP。
+- 单个手机号发券数量是否符合规则，拆分后的单次提交数量是否 `<= 100`。
+- 手机号导入结果总条数是否等于手机号数量，错误数和非会员数是否为 0。
 - 是否允许执行真实提交。
 
 本次流程中，人工 review 发生在 dry-run 输出后。用户确认“按脚本跑提交步骤”后，才执行真实提交脚本。
@@ -91,13 +98,13 @@ LLM 负责理解工单和 SOP 规则，但不直接绕过脚本写入中台。
 ## 标准执行流程
 
 1. 人工提供工单文本。
-2. LLM 提取字段并按 SOP 做初步校验。
-3. 脚本执行 dry-run 查询，生成待提交 payload。
+2. 脚本提取字段并按 SOP 做初步校验。
+3. 脚本执行 dry-run 查询和手机号 Excel 导入，生成待提交 payload。
 4. LLM 汇总 dry-run 结果给人工 review。
 5. 人工确认可以提交。
 6. 脚本执行 `invite-ticket-submit.mjs --confirm-submit`。
 7. 脚本保存提交结果。
-8. 脚本或 LLM 执行提交后只读复查，确认活动列表能查到新活动。
+8. 脚本执行提交后只读复查，确认活动列表能查到新活动，并把结果写入提交 JSON。
 9. LLM 汇总最终处理结果。
 
 ## 本次工单执行记录
@@ -135,7 +142,6 @@ Dry-run 查询结果：
 
 ## 当前边界
 
-- 当前流程适用于少量手机号，走 `memberSaveParamList` 直接选择会员。
-- 多手机号批量导入模式还需要单独抓取并固化 `importMobileSuccessKey` 分支。
+- 当前流程统一使用手机号 Excel 导入，单手机号和多手机号都走 `putPeopleType=2`。
 - 当前脚本依赖一个已经登录并开启 remote debugging 的 Chrome。
 - 当前脚本不会清理本地结果文件；这些文件会作为操作审计留存。

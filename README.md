@@ -87,6 +87,31 @@ python -m ticket_automation.cli analyze-har captures/coupon-scope.har --host adm
 python -m ticket_automation.cli validate examples/work_orders.sample.json
 ```
 
+招待券固定格式工单可以直接由脚本解析并 dry-run：
+
+```powershell
+node scripts/invite-ticket-dry-run.mjs --work-order-file examples/invite_ticket_work_order.sample.txt --out tmp/invite-ticket-dry-run.json
+```
+
+如果门店名称和门店编号不一致，dry-run 会生成 fallback JSON，并在 `returnComment` 中返回泛微退回批示语：`门店名称和门店编号不一致，请重新填写`。
+
+dry-run 会统一走“导入手机号”方式：脚本生成手机号 Excel、上传、查看导入结果，并校验导入总条数与手机号数量一致。它不会提交活动。
+
+人工 review dry-run JSON 后，再显式提交：
+
+```powershell
+node scripts/invite-ticket-submit.mjs --dry-run-file tmp/invite-ticket-dry-run.json --out tmp/invite-ticket-submit-result.json --confirm-submit
+```
+
+提交结果 JSON 会包含中台保存接口返回值，以及只读复查结果 `results[].postCheck`，用于确认活动列表能查到新建活动 ID 和活动编号。
+
+招待券发放数量规则：
+
+- 单个手机号发券数量不能超过 200。
+- 运营中台单次发券数量限制 100。
+- 数量 1-100 时提交一次。
+- 数量 101-200 时拆成两次提交，例如 150 拆成 100 和 50。
+
 ## 下一步
 
 拿到 HAR 后，我们会把候选接口分成：

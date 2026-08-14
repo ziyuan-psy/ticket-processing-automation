@@ -9,6 +9,8 @@ from typing import Any
 
 PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
 DEFAULT_INVITE_COUPON_TEMPLATE_ID = "CT20250521000001"
+MAX_INVITE_COUPONS_PER_PHONE = 200
+MAX_INVITE_COUPONS_PER_SUBMIT = 100
 
 
 class ValidationError(ValueError):
@@ -99,6 +101,12 @@ class InviteTicketIssue:
         return self.quantity_per_phone * len(self.phones)
 
     @property
+    def submit_quantities(self) -> list[int]:
+        if self.quantity_per_phone <= MAX_INVITE_COUPONS_PER_SUBMIT:
+            return [self.quantity_per_phone]
+        return [MAX_INVITE_COUPONS_PER_SUBMIT, self.quantity_per_phone - MAX_INVITE_COUPONS_PER_SUBMIT]
+
+    @property
     def suggested_activity_name(self) -> str:
         return self.activity_name or f"{self.store_name}-招待*{self.quantity_per_phone}"
 
@@ -107,10 +115,8 @@ class InviteTicketIssue:
         return f"{self.store_name}-招待*{self.quantity_per_phone}"
 
     def validate(self) -> None:
-        if self.quantity_per_phone > 100:
-            raise ValidationError("quantity_per_phone must be <= 100")
-        if self.total_quantity > 200:
-            raise ValidationError("total quantity must be <= 200")
+        if self.quantity_per_phone > MAX_INVITE_COUPONS_PER_PHONE:
+            raise ValidationError("quantity_per_phone must be <= 200")
         if self.activity_name and self.activity_name != self.expected_activity_name:
             raise ValidationError(
                 "activity_name must match "

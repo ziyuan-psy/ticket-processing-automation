@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createWriteStream, mkdirSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 
@@ -35,7 +35,11 @@ function parseArgs(argv) {
     out: "captures/cdp-network.ndjson",
     pauseNewTabs: false,
     maxBodyChars: 2000,
+    maxResponseBodyChars: 20000,
     keepPhones: false,
+    includeResponseBodies: false,
+    durationMs: 0,
+    stopFile: "",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -45,7 +49,11 @@ function parseArgs(argv) {
     else if (arg === "--out") opts.out = argv[++index];
     else if (arg === "--pause-new-tabs") opts.pauseNewTabs = true;
     else if (arg === "--max-body-chars") opts.maxBodyChars = Number(argv[++index]);
+    else if (arg === "--max-response-body-chars") opts.maxResponseBodyChars = Number(argv[++index]);
     else if (arg === "--keep-phones") opts.keepPhones = true;
+    else if (arg === "--include-response-bodies") opts.includeResponseBodies = true;
+    else if (arg === "--duration-ms") opts.durationMs = Number(argv[++index]);
+    else if (arg === "--stop-file") opts.stopFile = argv[++index];
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -56,6 +64,12 @@ function parseArgs(argv) {
 
   if (!Number.isFinite(opts.maxBodyChars) || opts.maxBodyChars < 0) {
     throw new Error("--max-body-chars must be a non-negative number");
+  }
+  if (!Number.isFinite(opts.maxResponseBodyChars) || opts.maxResponseBodyChars < 0) {
+    throw new Error("--max-response-body-chars must be a non-negative number");
+  }
+  if (!Number.isFinite(opts.durationMs) || opts.durationMs < 0) {
+    throw new Error("--duration-ms must be a non-negative number");
   }
   return opts;
 }
@@ -73,7 +87,13 @@ Options:
   --pause-new-tabs        Pause newly opened tabs until Network is enabled.
                            Useful when the first request in a popup matters.
   --max-body-chars <n>    Max request body characters to keep. Default: 2000
+  --max-response-body-chars <n>
+                          Max response body characters to keep. Default: 20000
   --keep-phones           Keep phone numbers in URLs and request bodies.
+  --include-response-bodies
+                          Record API response bodies after requests finish.
+  --duration-ms <n>       Stop automatically after this many milliseconds. Default: 0
+  --stop-file <path>      Stop when this file exists.
 `);
 }
 
@@ -228,10 +248,19 @@ class CdpRecorder {
       host: this.opts.host,
       pauseNewTabs: this.opts.pauseNewTabs,
       keepPhones: this.opts.keepPhones,
+      includeResponseBodies: this.opts.includeResponseBodies,
+      durationMs: this.opts.durationMs,
+      stopFile: this.opts.stopFile,
     });
 
     console.log(`Recording ${this.opts.host || "all hosts"} to ${outPath}`);
-    console.log("Press Ctrl+C to stop.");
+    if (this.opts.durationMs > 0) {
+      console.log(`Recorder will stop after ${this.opts.durationMs} ms.`);
+    } else if (this.opts.stopFile) {
+      console.log(`Recorder will stop when ${this.opts.stopFile} exists.`);
+    } else {
+      console.log("Press Ctrl+C to stop.");
+    }
   }
 
   async attachIfInspectableTarget(targetInfo) {
@@ -343,6 +372,7 @@ class CdpRecorder {
         url: request.url,
         method: request.method,
         targetInfo,
+        response: null,
       });
 
       this.write({
@@ -379,6 +409,15 @@ class CdpRecorder {
         fromServiceWorker: response.fromServiceWorker,
         headers: redactHeaders(response.headers, this.opts.keepPhones),
       });
+
+      const requestKey = `${sessionId}:${params.requestId}`;
+      const request = this.requests.get(requestKey);
+      if (request) {
+        request.response = {
+          status: response.status,
+          mimeType: response.mimeType,
+        };
+      }
       return;
     }
 
@@ -399,7 +438,55 @@ class CdpRecorder {
         canceled: params.canceled,
       });
 
-      if (method === "Network.loadingFailed") this.requests.delete(requestKey);
+      if (method === "Network.loadingFinished" && this.opts.includeResponseBodies) {
+        await this.writeResponseBody(sessionId, params.requestId, request);
+      }
+
+      this.requests.delete(requestKey);
+    }
+  }
+
+  async writeResponseBody(sessionId, requestId, request) {
+    const mimeType = request.response?.mimeType || "";
+    try {
+      const responseBody = await this.send("Network.getResponseBody", { requestId }, sessionId);
+      if (responseBody.base64Encoded) {
+        this.write({
+          event: "response-body",
+          sessionId,
+          requestId,
+          target: targetSummary(request.targetInfo, this.opts.keepPhones),
+          method: request.method,
+          url: redactUrl(request.url, this.opts.keepPhones),
+          mimeType,
+          base64Encoded: true,
+          body: "<base64 response omitted>",
+        });
+        return;
+      }
+
+      this.write({
+        event: "response-body",
+        sessionId,
+        requestId,
+        target: targetSummary(request.targetInfo, this.opts.keepPhones),
+        method: request.method,
+        url: redactUrl(request.url, this.opts.keepPhones),
+        mimeType,
+        base64Encoded: false,
+        body: redactBody(responseBody.body || "", this.opts.maxResponseBodyChars, this.opts.keepPhones),
+      });
+    } catch (error) {
+      this.write({
+        event: "response-body-failed",
+        sessionId,
+        requestId,
+        target: targetSummary(request.targetInfo, this.opts.keepPhones),
+        method: request.method,
+        url: redactUrl(request.url, this.opts.keepPhones),
+        mimeType,
+        error: String(error.message || error),
+      });
     }
   }
 
@@ -426,6 +513,24 @@ async function main() {
   });
 
   await recorder.start();
+  if (opts.durationMs > 0) {
+    setTimeout(() => {
+      console.log("\nStopping recorder after duration...");
+      recorder.close();
+      setTimeout(() => process.exit(0), 100);
+    }, opts.durationMs);
+  }
+  if (opts.stopFile) {
+    const stopPath = resolve(opts.stopFile);
+    const timer = setInterval(() => {
+      if (existsSync(stopPath)) {
+        clearInterval(timer);
+        console.log("\nStopping recorder after stop file...");
+        recorder.close();
+        setTimeout(() => process.exit(0), 100);
+      }
+    }, 1000);
+  }
 }
 
 main().catch((error) => {

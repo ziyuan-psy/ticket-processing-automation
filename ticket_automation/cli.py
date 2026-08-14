@@ -21,6 +21,7 @@ def _validate(path: str) -> int:
                 f"phones={len(order.phones)} "
                 f"quantity_per_phone={order.quantity_per_phone} "
                 f"total={order.total_quantity} "
+                f"submit_quantities={order.submit_quantities} "
                 f"activity={order.expected_activity_name}"
             )
         elif isinstance(order, CouponStoreScope):
