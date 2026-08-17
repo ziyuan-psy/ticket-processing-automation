@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import process from "node:process";
 
 const DEFAULT_COUPON_TEMPLATE_ID = "CT20250521000001";
+const DEFAULT_INVITE_SOURCE_ACTIVITY_NO = "47648259203850240";
 const ACTIVITY_API = "https://marketingadmin.cotticoffee.com";
 const SHOP_API = "https://memberprofileadmin.cotticoffee.com";
 const STORE_MISMATCH_RETURN_COMMENT = "门店名称和门店编号不一致，请重新填写";
@@ -375,6 +376,7 @@ function runtimeExpression(workOrder, xlsxBase64) {
   const ACTIVITY_API = ${JSON.stringify(ACTIVITY_API)};
   const SHOP_API = ${JSON.stringify(SHOP_API)};
   const STORE_MISMATCH_RETURN_COMMENT = ${JSON.stringify(STORE_MISMATCH_RETURN_COMMENT)};
+  const DEFAULT_INVITE_SOURCE_ACTIVITY_NO = ${JSON.stringify(DEFAULT_INVITE_SOURCE_ACTIVITY_NO)};
   const SUBMIT_ENDPOINT = ACTIVITY_API + "/manualActivity/djSave";
 
   const hashQuery = new URLSearchParams((location.hash.split("?")[1] || "").split("#")[0]);
@@ -508,29 +510,48 @@ function runtimeExpression(workOrder, xlsxBase64) {
     throw new Error("phone import is not complete: " + JSON.stringify(lastResult));
   }
 
+  async function queryActivityPage({ activityName = "", activityNo = null, pageSize = 10 }) {
+    const response = await api("POST", ACTIVITY_API + "/activity/page", {
+      pageNum: 1,
+      pageSize,
+      activityName,
+      activityNo,
+      activityType: "",
+      activityStatus: "",
+      modifyName: "",
+      startTime: ["2025-01-01 00:00:00", "2027-12-31 23:59:59"],
+    });
+    return rowsFrom(response.data);
+  }
+
+  function chooseSourceActivity(rows, predicates) {
+    for (const predicate of predicates) {
+      const found = rows.find(predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+
   const steps = [];
-  const activitySearch = await api("POST", ACTIVITY_API + "/activity/page", {
-    pageNum: 1,
-    pageSize: 10,
-    activityName: workOrder.storeName,
-    activityNo: null,
-    activityType: "",
-    activityStatus: "",
-    modifyName: "",
-    startTime: ["2025-01-01 00:00:00", "2027-12-31 23:59:59"],
-  });
-  const activityRows = rowsFrom(activitySearch.data);
-  const sourceActivity = chooseBy(
+  const sourceMode = "fixed_invite_template";
+  const activityRows = await queryActivityPage({ activityNo: DEFAULT_INVITE_SOURCE_ACTIVITY_NO, pageSize: 10 });
+  const sourceActivity = chooseSourceActivity(
     activityRows,
     [
-      (row) => String(row.activityName || "").includes(workOrder.storeName) && String(row.activityName || "").includes("招待"),
-      (row) => String(row.activityName || "").includes(workOrder.storeName),
-    ],
-    "source activity"
+      (row) => String(row.activityNo || "") === DEFAULT_INVITE_SOURCE_ACTIVITY_NO,
+    ]
   );
+  if (!sourceActivity) {
+    throw new Error(
+      "No matching fixed source activity found. fixedTemplateActivityNo=" +
+        DEFAULT_INVITE_SOURCE_ACTIVITY_NO +
+        " fixedTemplateCandidates=" +
+        JSON.stringify(activityRows.slice(0, 5))
+    );
+  }
   steps.push({ api: "POST /activity/page", candidates: activityRows.length, selected: {
     id: sourceActivity.id, activityNo: sourceActivity.activityNo, activityName: sourceActivity.activityName, activityStatus: sourceActivity.activityStatus,
-  }});
+  }, mode: sourceMode, fixedTemplateActivityNo: DEFAULT_INVITE_SOURCE_ACTIVITY_NO });
 
   const detailId = sourceActivity.id || sourceActivity.activityId;
   const detailResponse = await api("POST", ACTIVITY_API + "/manualActivity/detail?id=" + encodeURIComponent(detailId));

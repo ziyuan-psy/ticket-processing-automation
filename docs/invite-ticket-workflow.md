@@ -54,7 +54,7 @@ LLM 不再负责固定格式招待券工单的字段提取。LLM 主要负责解
 - 单手机号发券数量 `101-200` 时拆成两次提交 payload。
 - 通过 Chrome DevTools Protocol 连接当前已登录 Chrome。
 - 在 `marketingweb.yummy.tech` 页面上下文中复用当前登录态。
-- 查询可复制的手工发券活动：`POST /activity/page`
+- 按固定源活动编号 `47648259203850240` 查询可复制的手工发券活动：`POST /activity/page`
 - 查询活动详情：`POST /manualActivity/detail`
 - 查询固定券模板：`GET /coupon/djpage`
 - 查询并核对门店：`POST /crowd/shop/list`
