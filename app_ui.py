@@ -126,6 +126,7 @@ class TicketAutomationApp:
                 "mark",
                 "index",
                 "status",
+                "error",
                 "activity_names",
                 "store_check",
                 "import_result",
@@ -139,6 +140,7 @@ class TicketAutomationApp:
                 "mark": "提交?",
                 "index": "序号",
                 "status": "处理状态",
+                "error": "错误原因",
                 "activity_names": "活动名",
                 "store_check": "门店校验",
                 "import_result": "手机号导入",
@@ -152,6 +154,7 @@ class TicketAutomationApp:
                 "mark": 60,
                 "index": 50,
                 "status": 90,
+                "error": 320,
                 "activity_names": 280,
                 "store_check": 210,
                 "import_result": 180,
@@ -255,6 +258,7 @@ class TicketAutomationApp:
                 "☑" if ticket.index in self.submit_marks else "☐",
                 ticket.index,
                 STATUS_LABELS.get(ticket.status, ticket.status),
+                self._error_text(ticket),
                 self._activity_names(ticket),
                 self._store_check(ticket),
                 self._import_result(ticket),
@@ -272,6 +276,9 @@ class TicketAutomationApp:
     def _activity_names(self, ticket: ParsedTicket) -> str:
         names = ticket.fields.get("activity_names") or []
         return "；".join(str(name) for name in names)
+
+    def _error_text(self, ticket: ParsedTicket) -> str:
+        return "；".join(ticket.errors)
 
     def _store_check(self, ticket: ParsedTicket) -> str:
         store = ticket.fields.get("store_check")

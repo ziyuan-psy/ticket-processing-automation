@@ -101,6 +101,181 @@ class CdpClient {
   }
 }
 
+function summarizeTargets(targetInfos) {
+  return (targetInfos || [])
+    .filter((target) => ["page", "iframe"].includes(target.type))
+    .slice(0, 8)
+    .map((target) => `${target.type}: ${redactSensitive(target.title || "(no title)")} | ${redactSensitive(target.url || "(no url)")}`)
+    .join("; ");
+}
+
+function redactSensitive(value) {
+  return String(value || "")
+    .replace(/([?&](?:token|ticket)=)[^&#\s]+/gi, "$1<redacted>")
+    .replace(/((?:token|ticket)=)[^&#\s]+/gi, "$1<redacted>");
+}
+
+function targetScore(target) {
+  if (!["page", "iframe"].includes(target.type)) return 0;
+  const haystack = String(`${target.url || ""} ${target.title || ""}`);
+  if (haystack.includes("marketingweb.") && haystack.includes("token=")) return 40;
+  if (haystack.includes("admin.cotticoffee.com")) return 30;
+  if (haystack.includes("marketingweb.")) return 20;
+  if (haystack.includes("marketingadmin.cotticoffee.com")) return 10;
+  return 0;
+}
+
+function bootstrapExpression() {
+  return `
+(() => {
+  const hashQuery = new URLSearchParams((location.hash.split("?")[1] || "").split("#")[0]);
+  const searchQuery = new URLSearchParams(location.search || "");
+  const storageValue = (name) => {
+    try {
+      return localStorage.getItem(name) || sessionStorage.getItem(name);
+    } catch {
+      return "";
+    }
+  };
+  const cookieValue = (name) => {
+    try {
+      const prefix = name + "=";
+      const item = document.cookie.split("; ").find((part) => part.startsWith(prefix));
+      return item ? decodeURIComponent(item.slice(prefix.length)) : "";
+    } catch {
+      return "";
+    }
+  };
+  const token =
+    hashQuery.get("token") ||
+    searchQuery.get("token") ||
+    storageValue("token") ||
+    storageValue("Admin-Token") ||
+    storageValue("Authorization") ||
+    storageValue("access_token") ||
+    storageValue("joymo-token") ||
+    storageValue("backendToken") ||
+    storageValue("backend_token") ||
+    cookieValue("token") ||
+    cookieValue("Admin-Token") ||
+    "";
+  const brandMdCode =
+    hashQuery.get("brandMdCode") ||
+    searchQuery.get("brandMdCode") ||
+    storageValue("brandMdCode") ||
+    cookieValue("brandMdCode") ||
+    "20200000006";
+  return {
+    href: location.href,
+    title: document.title,
+    hasToken: Boolean(token),
+    token,
+    brandMdCode,
+    isChromeError: location.href.startsWith("chrome-error://"),
+    isMarketing: location.href.includes("marketingweb."),
+    isAdmin: location.href.includes("admin.cotticoffee.com"),
+  };
+})()
+`;
+}
+
+async function attachRuntime(client, targetInfo) {
+  const attach = await client.send("Target.attachToTarget", { targetId: targetInfo.targetId, flatten: true });
+  await client.send("Runtime.enable", {}, attach.sessionId);
+  return attach;
+}
+
+async function evaluateRuntime(client, sessionId, expression, timeout = 30000) {
+  const evaluation = await client.send(
+    "Runtime.evaluate",
+    { expression, awaitPromise: true, returnByValue: true, timeout },
+    sessionId,
+  );
+  if (evaluation.exceptionDetails) {
+    const description =
+      evaluation.exceptionDetails.exception?.description ||
+      evaluation.exceptionDetails.text ||
+      "Runtime evaluation failed";
+    throw new Error(description);
+  }
+  return evaluation.result?.value;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForMarketingTarget(client, targetId) {
+  let lastProbe = null;
+  for (let attempt = 1; attempt <= 15; attempt += 1) {
+    const targets = await client.send("Target.getTargets");
+    const targetInfo = targets.targetInfos.find((target) => target.targetId === targetId);
+    if (!targetInfo) {
+      await sleep(500);
+      continue;
+    }
+    const attach = await attachRuntime(client, targetInfo);
+    try {
+      const probe = await evaluateRuntime(client, attach.sessionId, bootstrapExpression(), 10000);
+      lastProbe = probe;
+      if (probe?.isMarketing && probe?.hasToken) return { targetInfo, attach, probe };
+    } catch (error) {
+      lastProbe = { error: error.message };
+    }
+    await client.send("Target.detachFromTarget", { sessionId: attach.sessionId });
+    await sleep(500);
+  }
+  throw new Error("Launched marketing page but no token became available. lastProbe=" + JSON.stringify({
+    ...lastProbe,
+    token: lastProbe?.token ? "<redacted>" : "",
+  }));
+}
+
+async function resolveMarketingSession(client, targetInfos) {
+  const candidates = (targetInfos || [])
+    .filter((target) => targetScore(target) > 0)
+    .sort((left, right) => targetScore(right) - targetScore(left));
+  let adminProbe = null;
+
+  for (const targetInfo of candidates) {
+    const attach = await attachRuntime(client, targetInfo);
+    let probe;
+    try {
+      probe = await evaluateRuntime(client, attach.sessionId, bootstrapExpression(), 10000);
+    } catch {
+      await client.send("Target.detachFromTarget", { sessionId: attach.sessionId });
+      continue;
+    }
+    if (probe?.isMarketing && probe?.hasToken) return { targetInfo, attach, probe };
+    if (probe?.isAdmin && probe?.hasToken && !probe.isChromeError && !adminProbe) {
+      adminProbe = probe;
+    }
+    await client.send("Target.detachFromTarget", { sessionId: attach.sessionId });
+  }
+
+  if (adminProbe?.hasToken) {
+    const marketingUrl =
+      "https://marketingweb.yummy.tech/#/dj/activityList/index?token=" +
+      encodeURIComponent(adminProbe.token) +
+      "&platform=subview&from=admin&brandMdCode=" +
+      encodeURIComponent(adminProbe.brandMdCode || "20200000006");
+    const created = await client.send("Target.createTarget", { url: marketingUrl });
+    return waitForMarketingTarget(client, created.targetId);
+  }
+
+  const chromeErrorTarget = candidates.find((target) => String(`${target.url || ""} ${target.title || ""}`).includes("admin.cotticoffee.com"));
+  if (chromeErrorTarget) {
+    throw new Error(
+      "No usable admin/marketing token found. The detected admin page may not be loaded or logged in. Available page targets: " +
+        summarizeTargets(targetInfos),
+    );
+  }
+  throw new Error(
+    "No admin/marketing tab found. Open admin.cotticoffee.com first. Available page targets: " +
+      summarizeTargets(targetInfos),
+  );
+}
+
 function readDryRun(path) {
   const result = JSON.parse(readFileSync(path, "utf8"));
   if (!result?.stoppedBeforeSubmit) throw new Error("Input file does not look like an invite-ticket dry run");
@@ -150,7 +325,22 @@ function runtimeExpression(payload, endpoint) {
 
   const hashQuery = new URLSearchParams((location.hash.split("?")[1] || "").split("#")[0]);
   const searchQuery = new URLSearchParams(location.search || "");
-  const storageValue = (name) => localStorage.getItem(name) || sessionStorage.getItem(name);
+  const storageValue = (name) => {
+    try {
+      return localStorage.getItem(name) || sessionStorage.getItem(name);
+    } catch {
+      return "";
+    }
+  };
+  const cookieValue = (name) => {
+    try {
+      const prefix = name + "=";
+      const item = document.cookie.split("; ").find((part) => part.startsWith(prefix));
+      return item ? decodeURIComponent(item.slice(prefix.length)) : "";
+    } catch {
+      return "";
+    }
+  };
   const token =
     hashQuery.get("token") ||
     searchQuery.get("token") ||
@@ -158,14 +348,21 @@ function runtimeExpression(payload, endpoint) {
     storageValue("Admin-Token") ||
     storageValue("Authorization") ||
     storageValue("access_token") ||
+    storageValue("joymo-token") ||
+    storageValue("backendToken") ||
+    storageValue("backend_token") ||
+    cookieValue("token") ||
+    cookieValue("Admin-Token") ||
     "";
   const brandMdCode =
     hashQuery.get("brandMdCode") ||
     searchQuery.get("brandMdCode") ||
     storageValue("brandMdCode") ||
+    cookieValue("brandMdCode") ||
     "20200000006";
 
   if (!token) throw new Error("No token found in current marketing page");
+  const pageHref = location.href.replace(/([?&](?:token|ticket)=)[^&#\\s]+/gi, "$1<redacted>");
 
   const headers = {
       terminalCode: "1",
@@ -276,7 +473,7 @@ function runtimeExpression(payload, endpoint) {
     status: response.status,
     statusText: response.statusText,
     endpoint,
-    page: { href: location.href, brandMdCode, hasToken: Boolean(token) },
+    page: { href: pageHref, brandMdCode, hasToken: Boolean(token) },
     response: json,
     responseText: text,
     postCheck,
@@ -297,41 +494,11 @@ async function main() {
   try {
     await client.send("Target.setDiscoverTargets", { discover: true });
     const targets = await client.send("Target.getTargets");
-    const targetInfo = (targets.targetInfos || []).find(
-      (target) =>
-        ["page", "iframe"].includes(target.type) &&
-        String(target.url || target.title || "").includes("marketingweb."),
-    );
-    if (!targetInfo) {
-      throw new Error("No marketingweb tab/iframe found. Open the marketing page first.");
-    }
-
-    const attach = await client.send("Target.attachToTarget", {
-      targetId: targetInfo.targetId,
-      flatten: true,
-    });
-    await client.send("Runtime.enable", {}, attach.sessionId);
+    const { attach } = await resolveMarketingSession(client, targets.targetInfos);
     const results = [];
     for (const payload of payloads) {
-      const evaluation = await client.send(
-        "Runtime.evaluate",
-        {
-          expression: runtimeExpression(payload, dryRun.submitEndpoint),
-          awaitPromise: true,
-          returnByValue: true,
-          timeout: 60000,
-        },
-        attach.sessionId,
-      );
-
-      if (evaluation.exceptionDetails) {
-        const description =
-          evaluation.exceptionDetails.exception?.description ||
-          evaluation.exceptionDetails.text ||
-          "Runtime evaluation failed";
-        throw new Error(description);
-      }
-      results.push(evaluation.result?.value);
+      const result = await evaluateRuntime(client, attach.sessionId, runtimeExpression(payload, dryRun.submitEndpoint), 60000);
+      results.push(result);
     }
 
     const output = {

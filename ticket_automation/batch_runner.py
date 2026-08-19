@@ -87,6 +87,31 @@ def _run_node(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _friendly_error(text: str) -> str:
+    cleaned = " ".join((text or "").split())
+    if "No usable admin/marketing token found" in cleaned:
+        detail = ""
+        marker = "Available page targets:"
+        if marker in cleaned:
+            detail = " 当前检测到：" + cleaned.split(marker, 1)[1].strip()
+        return "已找到运营中台标签页，但页面没有可用登录态；如果停在首页，请确认这个 remote-debugging Chrome 里的 admin.cotticoffee.com 是正常首页而不是浏览器错误页。" + detail
+    if "Launched marketing page but no token became available" in cleaned:
+        return "脚本已从首页尝试打开营销活动页，但营销页没有拿到 token；请在同一个 Chrome 中刷新/重新登录中台后再 dry-run。"
+    if "No marketingweb tab/iframe found" in cleaned or "No admin/marketing tab found" in cleaned:
+        detail = ""
+        marker = "Available page targets:"
+        if marker in cleaned:
+            detail = " 当前检测到：" + cleaned.split(marker, 1)[1].strip()
+        return "未找到可用的运营中台页面，请确认是在 remote-debugging Chrome 中打开并登录 admin.cotticoffee.com。" + detail
+    if "No token found in current marketing page" in cleaned:
+        return "当前运营中台页面没有登录 token，请重新登录后再 dry-run。"
+    if "No matching fixed source activity found" in cleaned:
+        return "没有查到固定源活动编号 47648259203850240，请确认当前账号/品牌下能访问该活动。"
+    if "store search returned no rows" in cleaned:
+        return "中台没有搜到该门店，请检查门店名称和门店编号。"
+    return cleaned or "执行失败，但脚本没有返回错误文本。"
+
+
 def run_invite_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> ParsedTicket:
     if ticket.ticket_type != INVITE_TICKET:
         ticket.status = "unsupported"
@@ -110,6 +135,7 @@ def run_invite_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> P
         ]
     )
     log_path.write_text(completed.stdout, encoding="utf-8")
+    ticket.fields["dry_run_log"] = str(log_path)
 
     if dry_run_path.exists():
         result = json.loads(dry_run_path.read_text(encoding="utf-8"))
@@ -161,7 +187,7 @@ def run_invite_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> P
         return ticket
 
     ticket.status = "dry_run_error"
-    ticket.errors = [completed.stdout.strip() or f"dry-run exited with code {completed.returncode}"]
+    ticket.errors = [_friendly_error(completed.stdout.strip() or f"dry-run exited with code {completed.returncode}")]
     return ticket
 
 
@@ -183,10 +209,11 @@ def submit_invite_ticket(ticket: ParsedTicket) -> ParsedTicket:
         ]
     )
     log_path.write_text(completed.stdout, encoding="utf-8")
+    ticket.fields["submit_log"] = str(log_path)
 
     if not submit_path.exists():
         ticket.status = "submit_error"
-        ticket.errors = [completed.stdout.strip() or f"submit exited with code {completed.returncode}"]
+        ticket.errors = [_friendly_error(completed.stdout.strip() or f"submit exited with code {completed.returncode}")]
         return ticket
 
     result = json.loads(submit_path.read_text(encoding="utf-8"))
