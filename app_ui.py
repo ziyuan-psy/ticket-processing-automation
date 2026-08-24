@@ -7,9 +7,10 @@ from tkinter import messagebox, ttk
 
 from ticket_automation.batch_runner import (
     default_batch_dir,
+    open_admin_chrome as launch_admin_chrome,
     parse_mixed_tickets,
-    run_invite_dry_run,
-    submit_invite_ticket,
+    run_ticket_dry_run,
+    submit_ticket,
 )
 from ticket_automation.pipelines.common import ParsedTicket
 
@@ -44,24 +45,26 @@ class TicketAutomationApp:
 
         toolbar = ttk.Frame(self.root, padding=(10, 8))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(8, weight=1)
+        toolbar.columnconfigure(9, weight=1)
 
         self.parse_button = ttk.Button(toolbar, text="解析工单", command=self.parse_tickets)
         self.parse_button.grid(row=0, column=0, padx=(0, 8))
+        self.open_chrome_button = ttk.Button(toolbar, text="打开中台 Chrome", command=self.open_admin_chrome)
+        self.open_chrome_button.grid(row=0, column=1, padx=(0, 8))
         self.dry_run_button = ttk.Button(toolbar, text="批量 dry-run", command=self.dry_run_all)
-        self.dry_run_button.grid(row=0, column=1, padx=(0, 8))
+        self.dry_run_button.grid(row=0, column=2, padx=(0, 8))
         self.select_all_button = ttk.Button(toolbar, text="全选可提交", command=self.mark_all_submittable)
-        self.select_all_button.grid(row=0, column=2, padx=(0, 8))
+        self.select_all_button.grid(row=0, column=3, padx=(0, 8))
         self.clear_marks_button = ttk.Button(toolbar, text="清除勾选", command=self.clear_submit_marks)
-        self.clear_marks_button.grid(row=0, column=3, padx=(0, 8))
+        self.clear_marks_button.grid(row=0, column=4, padx=(0, 8))
         self.submit_button = ttk.Button(toolbar, text="提交已勾选", command=self.submit_marked)
-        self.submit_button.grid(row=0, column=4, padx=(0, 8))
+        self.submit_button.grid(row=0, column=5, padx=(0, 8))
         self.copy_comment_button = ttk.Button(toolbar, text="复制退回批示语", command=self.copy_return_comment)
-        self.copy_comment_button.grid(row=0, column=5, padx=(0, 8))
+        self.copy_comment_button.grid(row=0, column=6, padx=(0, 8))
         self.clear_button = ttk.Button(toolbar, text="清空", command=self.clear_all)
-        self.clear_button.grid(row=0, column=6, padx=(0, 8))
+        self.clear_button.grid(row=0, column=7, padx=(0, 8))
         self.status_var = tk.StringVar(value="粘贴泛微工单后点击“解析工单”。")
-        ttk.Label(toolbar, textvariable=self.status_var).grid(row=0, column=8, sticky="e")
+        ttk.Label(toolbar, textvariable=self.status_var).grid(row=0, column=9, sticky="e")
 
         panes = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         panes.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -195,6 +198,7 @@ class TicketAutomationApp:
         state = tk.DISABLED if busy else tk.NORMAL
         for button in [
             self.parse_button,
+            self.open_chrome_button,
             self.dry_run_button,
             self.select_all_button,
             self.clear_marks_button,
@@ -205,6 +209,14 @@ class TicketAutomationApp:
             button.configure(state=state)
         if message:
             self.status_var.set(message)
+
+    def open_admin_chrome(self) -> None:
+        try:
+            message = launch_admin_chrome()
+        except Exception as error:  # noqa: BLE001 - GUI should show startup failures directly.
+            messagebox.showerror("打开中台 Chrome 失败", str(error))
+            return
+        self.status_var.set(message)
 
     def parse_tickets(self) -> None:
         text = self.input_text.get("1.0", tk.END).strip()
@@ -310,12 +322,12 @@ class TicketAutomationApp:
     def dry_run_all(self) -> None:
         targets = [ticket for ticket in self.tickets if ticket.can_dry_run]
         if not targets:
-            messagebox.showinfo("没有可 dry-run 工单", "当前没有已解析且可 dry-run 的招待券工单。")
+            messagebox.showinfo("没有可 dry-run 工单", "当前没有已解析且可 dry-run 的工单。")
             return
         self.batch_dir = self.batch_dir or default_batch_dir()
         self._run_background(
             targets,
-            lambda ticket: run_invite_dry_run(ticket, self.batch_dir),
+            lambda ticket: run_ticket_dry_run(ticket, self.batch_dir),
             f"正在 dry-run {len(targets)} 个工单...",
             "dry-run 完成。请在下方明细表勾选要提交的工单。",
         )
@@ -352,7 +364,7 @@ class TicketAutomationApp:
             return
         if not messagebox.askyesno("确认提交", f"将真实提交 {len(targets)} 个已勾选工单，是否继续？"):
             return
-        self._run_background(targets, submit_invite_ticket, f"正在提交 {len(targets)} 个工单...", "提交完成。")
+        self._run_background(targets, submit_ticket, f"正在提交 {len(targets)} 个工单...", "提交完成。")
 
     def _run_background(self, targets: list[ParsedTicket], action, start_message: str, done_message: str) -> None:
         if self._busy:

@@ -11,7 +11,7 @@ const ALLOWED_ENDPOINTS = new Set([
 
 function parseArgs(argv) {
   const opts = {
-    cdpUrl: process.env.CDP_URL || "http://127.0.0.1:9222",
+    cdpUrl: process.env.CDP_URL || "http://127.0.0.1:9223",
     dryRunFile: "tmp/invite-ticket-dry-run.json",
     out: "tmp/invite-ticket-submit-result.json",
     confirmSubmit: false,
@@ -42,7 +42,7 @@ function printHelp() {
   node scripts/invite-ticket-submit.mjs --dry-run-file <path> --confirm-submit
 
 Options:
-  --cdp-url <url>       Chrome remote debugging URL. Default: http://127.0.0.1:9222
+  --cdp-url <url>       Chrome remote debugging URL. Default: http://127.0.0.1:9223
   --out <path>          Write submit result JSON. Default: tmp/invite-ticket-submit-result.json
   --confirm-submit      Required. Calls /manualActivity/djSave and then performs a read-only activity list post-check.
 `);
@@ -71,7 +71,7 @@ class CdpClient {
     this.ws.addEventListener("message", (event) => this.handleMessage(event.data));
   }
 
-  send(method, params = {}, sessionId = undefined) {
+  send(method, params = {}, sessionId = undefined, timeoutMs = 15000) {
     const id = this.nextId++;
     const message = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
@@ -79,7 +79,7 @@ class CdpClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         rejectSend(new Error(`CDP command timed out: ${method}`));
-      }, 15000);
+      }, timeoutMs);
       this.pending.set(id, { resolve: resolveSend, reject: rejectSend, timeout, method });
       this.ws.send(JSON.stringify(message));
     });
@@ -181,7 +181,12 @@ function bootstrapExpression() {
 
 async function attachRuntime(client, targetInfo) {
   const attach = await client.send("Target.attachToTarget", { targetId: targetInfo.targetId, flatten: true });
-  await client.send("Runtime.enable", {}, attach.sessionId);
+  try {
+    await client.send("Runtime.enable", {}, attach.sessionId, 5000);
+  } catch (error) {
+    await client.send("Target.detachFromTarget", { sessionId: attach.sessionId }).catch(() => {});
+    throw error;
+  }
   return attach;
 }
 
@@ -190,6 +195,7 @@ async function evaluateRuntime(client, sessionId, expression, timeout = 30000) {
     "Runtime.evaluate",
     { expression, awaitPromise: true, returnByValue: true, timeout },
     sessionId,
+    timeout + 5000,
   );
   if (evaluation.exceptionDetails) {
     const description =
@@ -214,15 +220,16 @@ async function waitForMarketingTarget(client, targetId) {
       await sleep(500);
       continue;
     }
-    const attach = await attachRuntime(client, targetInfo);
+    let attach;
     try {
+      attach = await attachRuntime(client, targetInfo);
       const probe = await evaluateRuntime(client, attach.sessionId, bootstrapExpression(), 10000);
       lastProbe = probe;
       if (probe?.isMarketing && probe?.hasToken) return { targetInfo, attach, probe };
     } catch (error) {
       lastProbe = { error: error.message };
     }
-    await client.send("Target.detachFromTarget", { sessionId: attach.sessionId });
+    if (attach?.sessionId) await client.send("Target.detachFromTarget", { sessionId: attach.sessionId }).catch(() => {});
     await sleep(500);
   }
   throw new Error("Launched marketing page but no token became available. lastProbe=" + JSON.stringify({
@@ -236,14 +243,17 @@ async function resolveMarketingSession(client, targetInfos) {
     .filter((target) => targetScore(target) > 0)
     .sort((left, right) => targetScore(right) - targetScore(left));
   let adminProbe = null;
+  let lastCandidateError = null;
 
   for (const targetInfo of candidates) {
-    const attach = await attachRuntime(client, targetInfo);
+    let attach;
     let probe;
     try {
+      attach = await attachRuntime(client, targetInfo);
       probe = await evaluateRuntime(client, attach.sessionId, bootstrapExpression(), 10000);
-    } catch {
-      await client.send("Target.detachFromTarget", { sessionId: attach.sessionId });
+    } catch (error) {
+      lastCandidateError = error;
+      if (attach?.sessionId) await client.send("Target.detachFromTarget", { sessionId: attach.sessionId }).catch(() => {});
       continue;
     }
     if (probe?.isMarketing && probe?.hasToken) return { targetInfo, attach, probe };
@@ -261,6 +271,10 @@ async function resolveMarketingSession(client, targetInfos) {
       encodeURIComponent(adminProbe.brandMdCode || "20200000006");
     const created = await client.send("Target.createTarget", { url: marketingUrl });
     return waitForMarketingTarget(client, created.targetId);
+  }
+
+  if (candidates.length && /Runtime\.enable|timed out/i.test(String(lastCandidateError?.message || ""))) {
+    throw new Error("CDP command timed out: Runtime.enable. Candidate page targets did not respond to Runtime commands.");
   }
 
   const chromeErrorTarget = candidates.find((target) => String(`${target.url || ""} ${target.title || ""}`).includes("admin.cotticoffee.com"));

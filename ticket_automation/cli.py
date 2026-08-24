@@ -6,7 +6,7 @@ from .cdp_log_analyzer import analyze_cdp_log
 from .cdp_log_analyzer import print_report as print_cdp_report
 from .har_analyzer import analyze_har, print_report
 from .js_endpoint_extractor import extract as extract_js_endpoints
-from .models import CouponStoreScope, InviteTicketIssue, load_work_orders
+from .models import CouponStoreScope, CouponTicketIssue, InviteTicketIssue, load_work_orders
 
 
 def _validate(path: str) -> int:
@@ -23,6 +23,18 @@ def _validate(path: str) -> int:
                 f"total={order.total_quantity} "
                 f"submit_quantities={order.submit_quantities} "
                 f"activity={order.expected_activity_name}"
+            )
+        elif isinstance(order, CouponTicketIssue):
+            print(
+                f"{index}. coupon_ticket "
+                f"store={order.store_code}/{order.store_name} "
+                f"template={order.coupon_template_id} "
+                f"coupon={order.coupon_value} "
+                f"phones={len(order.phones)} "
+                f"quantity_per_phone={order.quantity_per_phone} "
+                f"total={order.total_quantity} "
+                f"submit_quantities={order.submit_quantities} "
+                f"activities={','.join(order.activity_name_for(item) for item in order.submit_quantities)}"
             )
         elif isinstance(order, CouponStoreScope):
             print(

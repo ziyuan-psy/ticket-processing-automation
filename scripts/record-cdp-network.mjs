@@ -30,7 +30,7 @@ const PHONE_RE = /1[3-9]\d{9}/g;
 
 function parseArgs(argv) {
   const opts = {
-    cdpUrl: process.env.CDP_URL || "http://127.0.0.1:9222",
+    cdpUrl: process.env.CDP_URL || "http://127.0.0.1:9223",
     host: "cotticoffee.com,yummy.tech,abite.com",
     out: "captures/cdp-network.ndjson",
     pauseNewTabs: false,
@@ -79,7 +79,7 @@ function printHelp() {
   node scripts/record-cdp-network.mjs [options]
 
 Options:
-  --cdp-url <url>         Chrome remote debugging URL. Default: http://127.0.0.1:9222
+  --cdp-url <url>         Chrome remote debugging URL. Default: http://127.0.0.1:9223
   --host <host>           Only record requests whose host contains this value.
                            Use commas for multiple hosts, or an empty string for all.
                            Default: cotticoffee.com,yummy.tech,abite.com
@@ -214,7 +214,7 @@ class CdpRecorder {
       version = await fetchJson(versionUrl);
     } catch (error) {
       console.error(`Cannot reach Chrome DevTools at ${versionUrl}.`);
-      console.error("Start Chrome with --remote-debugging-port=9222, then run this recorder again.");
+      console.error("Start Chrome with --remote-debugging-port=9223, then run this recorder again.");
       throw error;
     }
 

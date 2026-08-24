@@ -5,9 +5,12 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .pipelines.common import ParsedTicket
 from .pipelines.coupon_ticket import parse_coupon_ticket
@@ -18,6 +21,9 @@ from .ticket_splitter import split_ticket_blocks
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TMP_ROOT = REPO_ROOT / "tmp" / "gui-batches"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
+ADMIN_HOME_URL = "https://admin.cotticoffee.com/#/index"
+DEFAULT_CHROME_PROFILE_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CottiTicketAutomationChrome"
 
 
 def parse_mixed_tickets(text: str) -> list[ParsedTicket]:
@@ -68,6 +74,70 @@ def _node_executable() -> str:
     return found or "node"
 
 
+def _chrome_executable() -> str:
+    configured = os.environ.get("TICKET_AUTOMATION_CHROME")
+    candidates = [
+        Path(configured) if configured else None,
+        Path(os.environ.get("PROGRAMFILES", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return str(candidate)
+    found = shutil.which("chrome")
+    if found:
+        return found
+    raise FileNotFoundError("没有找到 Chrome，可设置环境变量 TICKET_AUTOMATION_CHROME 指向 chrome.exe。")
+
+
+def open_admin_chrome() -> str:
+    cdp_url = os.environ.get("TICKET_AUTOMATION_CDP_URL", DEFAULT_CDP_URL)
+    parsed = urlparse(cdp_url)
+    port = parsed.port or 9223
+    profile_dir = Path(os.environ.get("TICKET_AUTOMATION_CHROME_PROFILE", str(DEFAULT_CHROME_PROFILE_DIR)))
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen(
+        [
+            _chrome_executable(),
+            f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            ADMIN_HOME_URL,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+    return f"已打开工单专用中台 Chrome（调试端口 {port}）。请在该窗口登录后再 dry-run。"
+
+
+def check_cdp_ready() -> str | None:
+    cdp_url = os.environ.get("TICKET_AUTOMATION_CDP_URL", DEFAULT_CDP_URL).rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=3):
+            pass
+    except (OSError, urllib.error.URLError) as error:
+        return f"无法连接工单专用 Chrome 调试端口 {cdp_url}。请先点“打开中台 Chrome”并完成登录。原始错误：{error}"
+
+    try:
+        with urllib.request.urlopen(f"{cdp_url}/json/list", timeout=3) as response:
+            targets = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+        return f"Chrome 调试端口已打开，但无法读取页面列表。请关闭工单专用 Chrome 后重新点“打开中台 Chrome”。原始错误：{error}"
+
+    page_targets = [
+        target
+        for target in targets
+        if target.get("type") == "page" and not str(target.get("url", "")).startswith("devtools://")
+    ]
+    if not page_targets:
+        return "Chrome 调试端口已打开，但没有可用中台页面。请关闭工单专用 Chrome 后重新点“打开中台 Chrome”。"
+    return None
+
+
 def _safe_name(ticket: ParsedTicket) -> str:
     source = ticket.title or f"ticket-{ticket.index}"
     safe = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", source, flags=re.UNICODE).strip("-")
@@ -75,9 +145,12 @@ def _safe_name(ticket: ParsedTicket) -> str:
 
 
 def _run_node(args: list[str]) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["CDP_URL"] = env.get("TICKET_AUTOMATION_CDP_URL", DEFAULT_CDP_URL)
     return subprocess.run(
         [_node_executable(), *args],
         cwd=REPO_ROOT,
+        env=env,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -89,6 +162,12 @@ def _run_node(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 def _friendly_error(text: str) -> str:
     cleaned = " ".join((text or "").split())
+    if "CDP command timed out: Runtime.evaluate" in cleaned or "Runtime.evaluate timeout" in cleaned:
+        return "Chrome 页面运行时没有响应（Runtime.evaluate 超时）。请关闭工单专用 Chrome，重新点“打开中台 Chrome”并登录后再 dry-run。"
+    if "CDP command timed out: Runtime.enable" in cleaned or "Runtime.enable timeout" in cleaned:
+        return "Chrome 调试通道卡住了（Runtime.enable 超时）。请关闭当前 remote-debugging Chrome，重新用 run_app/启动命令打开登录中台，再重新 dry-run。"
+    if "CDP command timed out:" in cleaned:
+        return f"Chrome 调试通道超时，请重启 remote-debugging Chrome 后再试。原始错误：{cleaned}"
     if "No usable admin/marketing token found" in cleaned:
         detail = ""
         marker = "Available page targets:"
@@ -106,18 +185,42 @@ def _friendly_error(text: str) -> str:
     if "No token found in current marketing page" in cleaned:
         return "当前运营中台页面没有登录 token，请重新登录后再 dry-run。"
     if "No matching fixed source activity found" in cleaned:
-        return "没有查到固定源活动编号 47648259203850240，请确认当前账号/品牌下能访问该活动。"
+        match = re.search(r"fixedTemplateActivityNo=([0-9]+)", cleaned)
+        activity_no = match.group(1) if match else "对应"
+        return f"没有查到固定源活动编号 {activity_no}，请确认当前账号/品牌下能访问该活动。"
     if "store search returned no rows" in cleaned:
         return "中台没有搜到该门店，请检查门店名称和门店编号。"
     return cleaned or "执行失败，但脚本没有返回错误文本。"
 
 
-def run_invite_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> ParsedTicket:
-    if ticket.ticket_type != INVITE_TICKET:
+def _dry_run_script_for(ticket: ParsedTicket) -> str | None:
+    if ticket.ticket_type == INVITE_TICKET:
+        return "scripts/invite-ticket-dry-run.mjs"
+    if ticket.ticket_type == COUPON_TICKET:
+        return "scripts/coupon-ticket-dry-run.mjs"
+    return None
+
+
+def _submit_script_for(ticket: ParsedTicket) -> str | None:
+    if ticket.ticket_type == INVITE_TICKET:
+        return "scripts/invite-ticket-submit.mjs"
+    if ticket.ticket_type == COUPON_TICKET:
+        return "scripts/coupon-ticket-submit.mjs"
+    return None
+
+
+def run_ticket_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> ParsedTicket:
+    script = _dry_run_script_for(ticket)
+    if script is None:
         ticket.status = "unsupported"
-        ticket.errors = ["当前只支持招待券 dry-run。"]
+        ticket.errors = ["当前工单类型暂不支持 dry-run。"]
         return ticket
     if not ticket.can_dry_run:
+        return ticket
+    cdp_error = check_cdp_ready()
+    if cdp_error:
+        ticket.status = "dry_run_error"
+        ticket.errors = [cdp_error]
         return ticket
 
     batch_dir = batch_dir or default_batch_dir()
@@ -127,7 +230,7 @@ def run_invite_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> P
     log_path = batch_dir / f"{base}-dry-run.log"
     completed = _run_node(
         [
-            "scripts/invite-ticket-dry-run.mjs",
+            script,
             "--work-order-text",
             ticket.raw_text,
             "--out",
@@ -191,8 +294,21 @@ def run_invite_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> P
     return ticket
 
 
-def submit_invite_ticket(ticket: ParsedTicket) -> ParsedTicket:
+def run_invite_dry_run(ticket: ParsedTicket, batch_dir: Path | None = None) -> ParsedTicket:
+    if ticket.ticket_type != INVITE_TICKET:
+        ticket.status = "unsupported"
+        ticket.errors = ["当前只支持招待券 dry-run。"]
+        return ticket
+    return run_ticket_dry_run(ticket, batch_dir)
+
+
+def submit_ticket(ticket: ParsedTicket) -> ParsedTicket:
     if not ticket.can_submit:
+        return ticket
+    script = _submit_script_for(ticket)
+    if script is None:
+        ticket.status = "unsupported"
+        ticket.errors = ["当前工单类型暂不支持提交。"]
         return ticket
 
     dry_run_path = Path(ticket.dry_run_file or "")
@@ -200,7 +316,7 @@ def submit_invite_ticket(ticket: ParsedTicket) -> ParsedTicket:
     log_path = dry_run_path.with_name(dry_run_path.name.replace("-dry-run.json", "-submit-result.log"))
     completed = _run_node(
         [
-            "scripts/invite-ticket-submit.mjs",
+            script,
             "--dry-run-file",
             str(dry_run_path),
             "--out",
@@ -225,6 +341,14 @@ def submit_invite_ticket(ticket: ParsedTicket) -> ParsedTicket:
     ticket.fields["post_checks"] = [item.get("postCheck") for item in results]
     ticket.errors = [] if ok else ["中台提交返回异常，请查看提交结果 JSON。"]
     return ticket
+
+
+def submit_invite_ticket(ticket: ParsedTicket) -> ParsedTicket:
+    if ticket.ticket_type != INVITE_TICKET:
+        ticket.status = "unsupported"
+        ticket.errors = ["当前只支持招待券提交。"]
+        return ticket
+    return submit_ticket(ticket)
 
 
 def tickets_to_dicts(tickets: list[ParsedTicket]) -> list[dict]:

@@ -14,8 +14,11 @@ const MAX_PER_SUBMIT = 100;
 
 function parseArgs(argv) {
   const opts = {
-    cdpUrl: process.env.CDP_URL || "http://127.0.0.1:9222",
+    cdpUrl: process.env.CDP_URL || "http://127.0.0.1:9223",
     couponTemplateId: DEFAULT_COUPON_TEMPLATE_ID,
+    sourceActivityNo: DEFAULT_INVITE_SOURCE_ACTIVITY_NO,
+    activityNameFragment: "-招待",
+    workflowType: "invite_ticket",
     out: "tmp/invite-ticket-dry-run.json",
     parseOnly: false,
   };
@@ -30,6 +33,9 @@ function parseArgs(argv) {
     else if (arg === "--phone" || arg === "--phones") opts.phones = argv[++index];
     else if (arg === "--quantity") opts.quantity = Number(argv[++index]);
     else if (arg === "--coupon-template-id") opts.couponTemplateId = argv[++index];
+    else if (arg === "--source-activity-no") opts.sourceActivityNo = argv[++index];
+    else if (arg === "--activity-name-fragment") opts.activityNameFragment = argv[++index];
+    else if (arg === "--workflow-type") opts.workflowType = argv[++index];
     else if (arg === "--out") opts.out = argv[++index];
     else if (arg === "--parse-only") opts.parseOnly = true;
     else if (arg === "--help" || arg === "-h") {
@@ -47,6 +53,9 @@ function parseArgs(argv) {
     phones: opts.phones ?? parsed.phones,
     quantity: opts.quantity ?? parsed.quantity,
     couponTemplateId: opts.couponTemplateId,
+    sourceActivityNo: opts.sourceActivityNo,
+    activityNameFragment: opts.activityNameFragment,
+    workflowType: opts.workflowType,
   });
   return { ...opts, workOrder };
 }
@@ -54,12 +63,16 @@ function parseArgs(argv) {
 function printHelp() {
   console.log(`Usage:
   node scripts/invite-ticket-dry-run.mjs --work-order-file <txt>
-  node scripts/invite-ticket-dry-run.mjs --store-name <name> --store-code <JD...> --phones <mobile;mobile> --quantity <n>
+  node scripts/invite-ticket-dry-run.mjs --store-name <name> --store-code <JD...|Q...> --phones <mobile;mobile> --quantity <n>
 
 Options:
-  --cdp-url <url>             Chrome remote debugging URL. Default: http://127.0.0.1:9222
+  --cdp-url <url>             Chrome remote debugging URL. Default: http://127.0.0.1:9223
   --coupon-template-id <id>   Coupon template id. Default: ${DEFAULT_COUPON_TEMPLATE_ID}
   --out <path>                Write dry-run result JSON. Default: tmp/invite-ticket-dry-run.json
+  --source-activity-no <no>   Source activity to copy. Default: ${DEFAULT_INVITE_SOURCE_ACTIVITY_NO}
+  --activity-name-fragment <text>
+                              Text between store name and *quantity. Default: -招待
+  --workflow-type <type>      Metadata workflow type. Default: invite_ticket
   --parse-only                Only parse and validate the work order; do not call the admin APIs.
 
 Dry run calls read/query APIs and uploads the phone Excel to obtain an import key. It never calls /manualActivity/djSave.
@@ -145,23 +158,53 @@ function normalizePhones(value) {
   return phones;
 }
 
+function normalizeStoreCode(value) {
+  const storeCode = String(value || "").trim().toUpperCase();
+  if (!storeCode) throw new Error("store code is required");
+  if (/^\d+$/.test(storeCode)) return `JD${storeCode}`;
+  if (!/^(?:JD\d+|Q[A-Z0-9]+)$/.test(storeCode)) throw new Error("store code must be JD+digits, Q-prefixed, or digits only");
+  return storeCode;
+}
+
+function extractPhoneNumbers(value) {
+  const source = Array.isArray(value) ? value.join(" ") : String(value || "");
+  const matches = source.match(/(?<!\d)1[3-9]\d{9}(?!\d)/g) || [];
+  const phones = [];
+  const seen = new Set();
+  for (const phone of matches) {
+    if (!seen.has(phone)) {
+      seen.add(phone);
+      phones.push(phone);
+    }
+  }
+  if (!phones.length) throw new Error("at least one phone number is required");
+  return phones;
+}
+
 function normalizeWorkOrder(input) {
   const storeName = String(input.storeName || "").trim();
-  const storeCode = String(input.storeCode || "").trim();
-  const phones = normalizePhones(input.phones);
+  const storeCode = normalizeStoreCode(input.storeCode);
+  const phones = extractPhoneNumbers(input.phones);
   const quantity = Number(input.quantity);
   const couponTemplateId = String(input.couponTemplateId || DEFAULT_COUPON_TEMPLATE_ID).trim();
+  const sourceActivityNo = String(input.sourceActivityNo || DEFAULT_INVITE_SOURCE_ACTIVITY_NO).trim();
+  const activityNameFragment = String(input.activityNameFragment || "-招待").trim();
+  const workflowType = String(input.workflowType || "invite_ticket").trim();
 
   if (!storeName) throw new Error("store name is required");
-  if (!/^JD\d+$/.test(storeCode)) throw new Error("store code must start with JD and digits");
   if (!Number.isInteger(quantity) || quantity <= 0) throw new Error("quantity must be a positive integer");
   if (quantity > MAX_PER_PHONE) throw new Error(`single-phone quantity must be <= ${MAX_PER_PHONE}`);
+  if (!sourceActivityNo) throw new Error("source activity no is required");
+  if (!activityNameFragment) throw new Error("activity name fragment is required");
   return {
     storeName,
     storeCode,
     phones,
     quantity,
     couponTemplateId,
+    sourceActivityNo,
+    activityNameFragment,
+    workflowType,
     submitQuantities: splitQuantity(quantity),
     totalQuantity: quantity * phones.length,
   };
@@ -338,7 +381,7 @@ class CdpClient {
     this.ws.addEventListener("message", (event) => this.handleMessage(event.data));
   }
 
-  send(method, params = {}, sessionId = undefined) {
+  send(method, params = {}, sessionId = undefined, timeoutMs = 30000) {
     const id = this.nextId++;
     const message = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
@@ -346,7 +389,7 @@ class CdpClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         rejectSend(new Error(`CDP command timed out: ${method}`));
-      }, 30000);
+      }, timeoutMs);
       this.pending.set(id, { resolve: resolveSend, reject: rejectSend, timeout, method });
       this.ws.send(JSON.stringify(message));
     });
@@ -448,7 +491,12 @@ function bootstrapExpression() {
 
 async function attachRuntime(client, targetInfo) {
   const attach = await client.send("Target.attachToTarget", { targetId: targetInfo.targetId, flatten: true });
-  await client.send("Runtime.enable", {}, attach.sessionId);
+  try {
+    await client.send("Runtime.enable", {}, attach.sessionId, 5000);
+  } catch (error) {
+    await client.send("Target.detachFromTarget", { sessionId: attach.sessionId }).catch(() => {});
+    throw error;
+  }
   return attach;
 }
 
@@ -457,6 +505,7 @@ async function evaluateRuntime(client, sessionId, expression, timeout = 30000) {
     "Runtime.evaluate",
     { expression, awaitPromise: true, returnByValue: true, timeout },
     sessionId,
+    timeout + 5000,
   );
   if (evaluation.exceptionDetails) {
     const description = evaluation.exceptionDetails.exception?.description || evaluation.exceptionDetails.text || "Runtime evaluation failed";
@@ -478,15 +527,16 @@ async function waitForMarketingTarget(client, targetId) {
       await sleep(500);
       continue;
     }
-    const attach = await attachRuntime(client, targetInfo);
+    let attach;
     try {
+      attach = await attachRuntime(client, targetInfo);
       const probe = await evaluateRuntime(client, attach.sessionId, bootstrapExpression(), 10000);
       lastProbe = probe;
       if (probe?.isMarketing && probe?.hasToken) return { targetInfo, attach, probe };
     } catch (error) {
       lastProbe = { error: error.message };
     }
-    await client.send("Target.detachFromTarget", { sessionId: attach.sessionId });
+    if (attach?.sessionId) await client.send("Target.detachFromTarget", { sessionId: attach.sessionId }).catch(() => {});
     await sleep(500);
   }
   throw new Error("Launched marketing page but no token became available. lastProbe=" + JSON.stringify({
@@ -500,14 +550,17 @@ async function resolveMarketingSession(client, targetInfos) {
     .filter((target) => targetScore(target) > 0)
     .sort((left, right) => targetScore(right) - targetScore(left));
   let adminProbe = null;
+  let lastCandidateError = null;
 
   for (const targetInfo of candidates) {
-    const attach = await attachRuntime(client, targetInfo);
+    let attach;
     let probe;
     try {
+      attach = await attachRuntime(client, targetInfo);
       probe = await evaluateRuntime(client, attach.sessionId, bootstrapExpression(), 10000);
-    } catch {
-      await client.send("Target.detachFromTarget", { sessionId: attach.sessionId });
+    } catch (error) {
+      lastCandidateError = error;
+      if (attach?.sessionId) await client.send("Target.detachFromTarget", { sessionId: attach.sessionId }).catch(() => {});
       continue;
     }
     if (probe?.isMarketing && probe?.hasToken) return { targetInfo, attach, probe };
@@ -525,6 +578,10 @@ async function resolveMarketingSession(client, targetInfos) {
       encodeURIComponent(adminProbe.brandMdCode || "20200000006");
     const created = await client.send("Target.createTarget", { url: marketingUrl });
     return waitForMarketingTarget(client, created.targetId);
+  }
+
+  if (candidates.length && /Runtime\.enable|timed out/i.test(String(lastCandidateError?.message || ""))) {
+    throw new Error("CDP command timed out: Runtime.enable. Candidate page targets did not respond to Runtime commands.");
   }
 
   const chromeErrorTarget = candidates.find((target) => String(`${target.url || ""} ${target.title || ""}`).includes("admin.cotticoffee.com"));
@@ -548,7 +605,6 @@ function runtimeExpression(workOrder, xlsxBase64) {
   const ACTIVITY_API = ${JSON.stringify(ACTIVITY_API)};
   const SHOP_API = ${JSON.stringify(SHOP_API)};
   const STORE_MISMATCH_RETURN_COMMENT = ${JSON.stringify(STORE_MISMATCH_RETURN_COMMENT)};
-  const DEFAULT_INVITE_SOURCE_ACTIVITY_NO = ${JSON.stringify(DEFAULT_INVITE_SOURCE_ACTIVITY_NO)};
   const SUBMIT_ENDPOINT = ACTIVITY_API + "/manualActivity/djSave";
 
   const hashQuery = new URLSearchParams((location.hash.split("?")[1] || "").split("#")[0]);
@@ -727,25 +783,25 @@ function runtimeExpression(workOrder, xlsxBase64) {
   }
 
   const steps = [];
-  const sourceMode = "fixed_invite_template";
-  const activityRows = await queryActivityPage({ activityNo: DEFAULT_INVITE_SOURCE_ACTIVITY_NO, pageSize: 10 });
+  const sourceMode = workOrder.workflowType === "coupon_ticket" ? "fixed_coupon_template" : "fixed_invite_template";
+  const activityRows = await queryActivityPage({ activityNo: workOrder.sourceActivityNo, pageSize: 10 });
   const sourceActivity = chooseSourceActivity(
     activityRows,
     [
-      (row) => String(row.activityNo || "") === DEFAULT_INVITE_SOURCE_ACTIVITY_NO,
+      (row) => String(row.activityNo || "") === workOrder.sourceActivityNo,
     ]
   );
   if (!sourceActivity) {
     throw new Error(
       "No matching fixed source activity found. fixedTemplateActivityNo=" +
-        DEFAULT_INVITE_SOURCE_ACTIVITY_NO +
+        workOrder.sourceActivityNo +
         " fixedTemplateCandidates=" +
         JSON.stringify(activityRows.slice(0, 5))
     );
   }
   steps.push({ api: "POST /activity/page", candidates: activityRows.length, selected: {
     id: sourceActivity.id, activityNo: sourceActivity.activityNo, activityName: sourceActivity.activityName, activityStatus: sourceActivity.activityStatus,
-  }, mode: sourceMode, fixedTemplateActivityNo: DEFAULT_INVITE_SOURCE_ACTIVITY_NO });
+  }, mode: sourceMode, fixedTemplateActivityNo: workOrder.sourceActivityNo });
 
   const detailId = sourceActivity.id || sourceActivity.activityId;
   const detailResponse = await api("POST", ACTIVITY_API + "/manualActivity/detail?id=" + encodeURIComponent(detailId));
@@ -830,7 +886,7 @@ function runtimeExpression(workOrder, xlsxBase64) {
     const payload = JSON.parse(JSON.stringify(detail));
     payload.id = null;
     payload.activityStatus = null;
-    payload.activityName = workOrder.storeName + "-招待*" + sendNums;
+    payload.activityName = workOrder.storeName + workOrder.activityNameFragment + "*" + sendNums;
     payload.shopExtend = 1;
     payload.putShopType = 1;
     payload.shopMdCode = shop.shopMdCode;
@@ -863,7 +919,7 @@ function runtimeExpression(workOrder, xlsxBase64) {
     page: { href: pageHref, brandMdCode, hasToken: Boolean(token) },
     workOrder: {
       ...workOrder,
-      activityNames: workOrder.submitQuantities.map((quantity) => workOrder.storeName + "-招待*" + quantity),
+      activityNames: workOrder.submitQuantities.map((quantity) => workOrder.storeName + workOrder.activityNameFragment + "*" + quantity),
     },
     steps,
     submitEndpoint: SUBMIT_ENDPOINT,

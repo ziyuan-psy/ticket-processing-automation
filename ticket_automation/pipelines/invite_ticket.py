@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..models import DEFAULT_INVITE_COUPON_TEMPLATE_ID, InviteTicketIssue, ValidationError
+from ..models import DEFAULT_INVITE_COUPON_TEMPLATE_ID, InviteTicketIssue, ValidationError, extract_phone_numbers
 from ..ticket_classifier import INVITE_TICKET
 from ..ticket_splitter import TicketBlock
 from .common import ParsedTicket
@@ -58,16 +58,7 @@ def _parse_labeled_fields(text: str) -> dict[str, str]:
 
 
 def _normalize_phones(value: str) -> list[str]:
-    phones: list[str] = []
-    seen: set[str] = set()
-    for item in re.split(r"[;；,，\s]+", value or ""):
-        phone = item.strip()
-        if not phone:
-            continue
-        if phone not in seen:
-            seen.add(phone)
-            phones.append(phone)
-    return phones
+    return extract_phone_numbers(value)
 
 
 def _quantity(value: Any) -> int | None:
@@ -92,6 +83,7 @@ def parse_invite_ticket(block: TicketBlock) -> ParsedTicket:
         issue.validate()
         parsed_fields.update(
             {
+                "store_code": issue.store_code,
                 "phones": issue.phones,
                 "quantity_per_phone": issue.quantity_per_phone,
                 "submit_quantities": issue.submit_quantities,
