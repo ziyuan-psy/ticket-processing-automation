@@ -162,9 +162,11 @@ scripts/
   coupon-ticket-submit.mjs        优惠券提交
   record-cdp-network.mjs          CDP 抓接口工具
 docs/
-  api-discovery.md                接口发现记录
-  invite-ticket-workflow.md       招待券 workflow 记录
-  sop-notes.md                    SOP 规则整理
+  api-discovery.md                历史接口发现记录
+examples/
+  invite_ticket_work_order.sample.txt    招待券样例
+  coupon_ticket_work_order.sample.txt    优惠券样例
+  mixed_work_orders.sample.txt           GUI 混合粘贴样例
 ```
 
 ### 2. 当前技术流程

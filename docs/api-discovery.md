@@ -1,4 +1,8 @@
-# API Discovery Notes
+# API Discovery History
+
+本文是早期识别中台接口时留下的历史记录。
+
+当前使用方式、业务规则和拓展步骤以 `README.md` 为准；实际执行逻辑以 `scripts/` 和 `ticket_automation/` 中的代码为准。
 
 ## Capture Summary
 
