@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import asdict
@@ -19,8 +20,11 @@ from .ticket_classifier import COUPON_TICKET, INVITE_TICKET, UNKNOWN_TICKET, cla
 from .ticket_splitter import split_ticket_blocks
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-TMP_ROOT = REPO_ROOT / "tmp" / "gui-batches"
+FROZEN = bool(getattr(sys, "frozen", False))
+APP_ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(getattr(sys, "_MEIPASS", APP_ROOT)) if FROZEN else APP_ROOT
+APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "TicketProcessingAutomation"
+TMP_ROOT = (APP_DATA_ROOT if FROZEN else REPO_ROOT) / "tmp" / "gui-batches"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 ADMIN_HOME_URL = "https://admin.cotticoffee.com/#/index"
 DEFAULT_CHROME_PROFILE_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CottiTicketAutomationChrome"
@@ -58,6 +62,9 @@ def _node_executable() -> str:
     configured = os.environ.get("TICKET_AUTOMATION_NODE")
     if configured:
         return configured
+    packaged = APP_ROOT / "runtime" / "node.exe"
+    if packaged.exists():
+        return str(packaged)
     bundled = (
         Path.home()
         / ".cache"

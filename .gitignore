@@ -6,3 +6,6 @@ captures/
 *.har
 *.log
 *.pdf
+build/
+dist/
+*.spec

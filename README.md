@@ -18,9 +18,8 @@
 - 所有招待券工单统一复制固定源活动编号 `47648259203850240`，再覆盖为当前工单的门店、手机号、数量和活动名。
 - 活动名称格式固定为 `店名-招待*单个手机号发券数量`。
 - SOP 截图里红色方框标出的内容，都是自动化需要填写或修改的字段。
-- 单次发放数量 <= 100。
-- 总量 = 数量 * 手机号数量，总量 <= 200。
-- 多个手机号走投放人群 -> 导入手机号 -> 批量导入。
+- 单个手机号发券数量不能超过 200，单次提交最多 100，超出则拆成多次。
+- 无论单个还是多个手机号都走投放人群 -> 导入手机号 -> 批量导入。
 - 复制现有活动时，需要先删除原门店和手机号已选项，再添加新的。
 
 优惠券发放：
@@ -96,6 +95,24 @@ python -m ticket_automation.cli validate examples/work_orders.sample.json
 ```
 
 点击 GUI 顶部的 `打开中台 Chrome` 会用工单专用 profile 和 `9223` 调试端口打开运营中台首页；登录这个窗口后再执行 dry-run。
+
+## 打包给同事使用
+
+Windows 打包产物会把 Python GUI 打成 exe，并把 Node 放到 exe 同目录的 `runtime\node.exe`。同事不需要安装 Python 或 Node，只需要电脑里有 Chrome。
+
+在开发机上构建：
+
+```powershell
+.\build_windows.ps1
+```
+
+构建完成后，把这个 zip 发给同事：
+
+```text
+dist\TicketProcessingAutomation.zip
+```
+
+同事解压后双击 `launch.bat` 或 `TicketProcessingAutomation.exe`，再点 GUI 顶部的 `打开中台 Chrome` 登录中台。
 
 当前已接入：
 
