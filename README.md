@@ -1,42 +1,181 @@
 # Ticket Processing Automation
 
-这个工作区先从 `泛微联营商工单处理SOP.pdf` 里最简单的两类任务开始：
+用于批量处理泛微工单中的发券类任务。当前支持把固定格式工单粘贴到 GUI 中，自动拆分、分类、解析、dry-run、人工勾选提交，并在提交后做只读复查。
+
+当前已接入：
 
 - 招待券发放
 - 优惠券发放
+- 未识别工单会在 GUI 中标记为“暂不支持”，不影响其他工单处理
 
-当前版本支持把固定格式工单解析成本地校验结果，并通过运营中台接口执行发券活动的 dry-run 和人工确认后的提交。
+## 一、GUI 使用说明
 
-## 从 SOP 提取的关键规则
+### 1. 免安装版怎么使用
+
+免安装版适合普通运营同事使用。同事不需要安装 Python 或 Node，只需要电脑里有 Chrome。
+
+1. 解压 `TicketProcessingAutomation.zip`。
+2. 双击 `launch.bat` 或 `TicketProcessingAutomation.exe`。
+3. 点击 GUI 顶部的 `打开中台 Chrome`。
+4. 在新打开的 Chrome 窗口里登录运营中台。
+5. 回到 GUI，粘贴一批泛微工单。
+6. 点击 `解析工单`。
+7. 点击 `批量 dry-run`。
+8. 在下方 dry-run 明细表里勾选确认要提交的工单。
+9. 点击 `提交已勾选`。
+
+免安装 zip 的构建产物路径：
+
+```text
+dist\TicketProcessingAutomation.zip
+```
+
+### 2. 源码版怎么启动 GUI
+
+源码版适合维护/开发同事使用：
+
+```powershell
+.\run_app.ps1
+```
+
+`run_app.ps1` 会优先使用 Codex bundled Python；如果不存在，则回退到系统 `python`。
+
+### 3. 为什么要点“打开中台 Chrome”
+
+自动化脚本不是直接控制普通 Chrome 页面，而是通过 Chrome DevTools Protocol 连接一个带调试端口的专用 Chrome。
+
+GUI 顶部的 `打开中台 Chrome` 会打开：
+
+- 中台地址：`https://admin.cotticoffee.com/#/index`
+- 调试端口：`9223`
+- 专用 profile：`%LOCALAPPDATA%\CottiTicketAutomationChrome`
+
+使用专用 `9223` 端口是为了避免和每日企微导出等其他自动化工具的 Chrome 调试端口冲突。
+
+### 4. GUI 页面说明
+
+- `工单粘贴区`：粘贴一批泛微工单，可以混合招待券和优惠券。
+- `解析结果`：展示工单类型、标题、门店、门店编号、手机号数量、数量拆分、解析错误。
+- `dry-run 明细与提交勾选`：展示门店校验、手机号导入结果、payload 拆分、退回批示语、提交后复查结果。
+- `复制退回批示语`：复制 fallback 工单的泛微退回说明。
+- `提交已勾选`：只提交下方表格里已勾选且状态为“可提交”的工单，并会弹窗二次确认。
+
+### 5. 当前业务规则
 
 招待券发放：
 
-- 入口：用户营销平台 -> 卡券系统 -> 优惠券管理，选择模板并复制模板标识。
-- 入口：用户营销平台 -> 营销系统 -> 活动管理，复制/新建手工发券活动。
-- 需要核对门店编号和门店名称是否对应。
-- 当前招待券固定使用优惠券模板 `CT20250521000001`，不需要每次重新复制模板标识。
-- 所有招待券工单统一复制固定源活动编号 `47648259203850240`，再覆盖为当前工单的门店、手机号、数量和活动名。
-- 活动名称格式固定为 `店名-招待*单个手机号发券数量`。
-- SOP 截图里红色方框标出的内容，都是自动化需要填写或修改的字段。
-- 单个手机号发券数量不能超过 200，单次提交最多 100，超出则拆成多次。
-- 无论单个还是多个手机号都走投放人群 -> 导入手机号 -> 批量导入。
-- 复制现有活动时，需要先删除原门店和手机号已选项，再添加新的。
+- 固定使用优惠券模板 `CT20250521000001`。
+- 统一复制源活动编号 `47648259203850240`。
+- 活动名称格式：`店名-招待*单个手机号发券数量`。
+- 自动覆盖当前工单的门店、手机号、数量和活动名。
+- 无论单个还是多个手机号，都走“投放人群 -> 导入手机号 -> 批量导入”。
 
 优惠券发放：
 
-- 入口：用户营销平台 -> 卡券系统 -> 优惠券管理。
-- 选择模板并复制模板标识。
-- 优惠券统一复制源活动编号 `47678430008262656`，再覆盖为当前工单的门店、手机号、数量、活动名和券模板。
-- 活动名称格式固定为 `店名优惠-x元/x折*单个手机号发券数量`。
-- 门店编号支持 `JD+数字` 或 `Q+数字`；纯数字门店编号会自动补成 `JD+数字` 后查询。
-- 单个手机号发券数量不能超过 200，单次提交最多 100，超出则拆成多次。
+- 统一复制源活动编号 `47678430008262656`。
+- 根据工单里的“申请券类型”和“券金额/券折扣”自动选择券模板。
+- 活动名称格式：`店名优惠-x元/x折*单个手机号发券数量`。
 - 折扣输入会归一化，例如 `88折 -> 8.8折`、`9.5折 -> 95折`。
 
-## 推荐抓接口方式：CDP 全浏览器录制
+通用规则：
 
-多 tab 流程优先用这个方法。它通过 Chrome DevTools Protocol 监听整个 Chrome 实例，会自动跟踪已打开页面和后续弹出的新 tab。
+- 门店编号支持 `JD+数字` 或 `Q+数字/字母`。
+- 纯数字门店编号会自动补成 `JD+数字` 后查询。
+- 手机号字段里可以包含姓名或其他汉字，解析时只提取符合 `^1[3-9]\d{9}$` 的手机号。
+- 单个手机号发券数量不能超过 200。
+- 运营中台单次提交最多 100 张，数量 101-200 会拆成多次，例如 150 拆成 100 和 50。
+- dry-run 会校验门店名称和门店编号是否匹配；不匹配时返回退回批示语：`门店名称和门店编号不一致，请重新填写`。
 
-先启动一个专门用于抓包的 Chrome：
+### 6. dry-run 和提交分别做什么
+
+dry-run 会调用查询、导入和预检查接口，但不会调用真实保存接口。它会：
+
+- 查询固定源活动
+- 查询券模板
+- 查询并校验门店
+- 生成手机号 Excel 并上传
+- 查询手机号导入结果
+- 生成待提交 payload
+
+提交时会读取 dry-run JSON，二次校验后调用中台保存接口，并按活动名做提交后只读复查。
+
+### 7. 常见问题
+
+如果 PowerShell 提示找不到 `.\run_app.ps1`，先切到项目目录：
+
+```powershell
+cd "C:\Users\EDY\Documents\Ticket Processing Automation"
+.\run_app.ps1
+```
+
+如果 dry-run 长时间不结束，通常是专用 Chrome 调试通道卡住。关闭工单专用 Chrome，重新点 GUI 顶部的 `打开中台 Chrome`，登录后再 dry-run。
+
+如果打开了普通 Chrome 并手动输入中台网址，脚本无法连接它。必须用 GUI 的 `打开中台 Chrome` 打开带 `9223` 调试端口的专用窗口。
+
+## 二、维护和拓展说明
+
+### 1. 源码结构
+
+```text
+app_ui.py                         GUI 入口
+run_app.ps1                       源码版 GUI 启动脚本
+build_windows.ps1                 Windows 免安装包构建脚本
+ticket_automation/
+  batch_runner.py                 GUI 调用 parser 和 Node 脚本的调度层
+  models.py                       工单模型、校验规则、券模板映射
+  ticket_classifier.py            工单类型识别
+  ticket_splitter.py              混合粘贴文本拆分
+  pipelines/
+    invite_ticket.py              招待券工单 parser
+    coupon_ticket.py              优惠券工单 parser
+scripts/
+  invite-ticket-dry-run.mjs       招待券 dry-run
+  invite-ticket-submit.mjs        招待券提交
+  coupon-ticket-dry-run.mjs       优惠券 dry-run
+  coupon-ticket-submit.mjs        优惠券提交
+  record-cdp-network.mjs          CDP 抓接口工具
+docs/
+  api-discovery.md                接口发现记录
+  invite-ticket-workflow.md       招待券 workflow 记录
+  sop-notes.md                    SOP 规则整理
+```
+
+### 2. 当前技术流程
+
+- GUI 负责录入、展示、勾选、调度。
+- Python parser 负责工单拆分、分类、字段提取和本地校验。
+- Node 脚本通过 Chrome CDP 读取登录态，并在中台页面上下文里调用接口。
+- dry-run 只生成 payload，不提交活动。
+- submit 读取 dry-run JSON，二次校验后提交。
+- submit 后做只读复查，把结果写回 GUI。
+
+### 3. 如何加新的工单类型
+
+新增一种工单类型时，建议按这个顺序接入：
+
+1. 在 `ticket_automation/ticket_classifier.py` 增加识别规则。
+2. 在 `ticket_automation/models.py` 增加工单 dataclass、字段校验和常量映射。
+3. 在 `ticket_automation/pipelines/` 下新增 parser。
+4. 在 `ticket_automation/batch_runner.py` 里注册 dry-run/submit 脚本分发。
+5. 在 `scripts/` 下新增对应的 dry-run 和 submit 脚本。
+6. 确认 GUI 表格是否需要新增展示字段。
+7. 增加样例，先跑 parse-only 和 dry-run。
+8. dry-run 稳定后，再接真实 submit。
+
+新工单类型的最低安全要求：
+
+- parser 能稳定提取字段。
+- 本地校验能拦截明显错误。
+- dry-run 不调用写入接口。
+- submit 必须要求显式确认参数。
+- submit 前必须校验 dry-run JSON 来源和关键 payload 字段。
+- submit 后必须做只读复查。
+
+### 4. 如何抓新接口
+
+多 tab 流程优先使用 CDP 全浏览器录制。它会监听整个专用 Chrome 实例，并自动跟踪后续打开的新 tab。
+
+先启动专用 Chrome：
 
 ```powershell
 $profile="$env:LOCALAPPDATA\CottiTicketAutomationChrome"
@@ -46,127 +185,86 @@ $profile="$env:LOCALAPPDATA\CottiTicketAutomationChrome"
 然后开始录制：
 
 ```powershell
-node scripts/record-cdp-network.mjs --out captures/invite-ticket.ndjson --host cotticoffee.com,yummy.tech,abite.com --pause-new-tabs --keep-phones
+node scripts/record-cdp-network.mjs --out captures/new-flow.ndjson --host cotticoffee.com,yummy.tech,abite.com --pause-new-tabs --keep-phones
 ```
 
-录制期间在这个 Chrome 里完整做一次招待券流程。结束后按 `Ctrl+C` 停止录制，再分析：
+录制期间在这个 Chrome 里完整做一次人工流程。结束后按 `Ctrl+C` 停止录制，再分析：
 
 ```powershell
-python -m ticket_automation.cli analyze-cdp-log captures/invite-ticket.ndjson --host cotticoffee.com,yummy.tech,abite.com --keep-phones
+python -m ticket_automation.cli analyze-cdp-log captures/new-flow.ndjson --host cotticoffee.com,yummy.tech,abite.com --keep-phones
 ```
 
-优惠券适用门店导入流程同理：
+`--pause-new-tabs` 会让新开的 tab 在 Network 监听启用后再继续加载，适合捕捉弹窗或新 tab 打开后的第一批接口。
 
-```powershell
-node scripts/record-cdp-network.mjs --out captures/coupon-scope.ndjson --host cotticoffee.com,yummy.tech,abite.com --pause-new-tabs --keep-phones
-python -m ticket_automation.cli analyze-cdp-log captures/coupon-scope.ndjson --host cotticoffee.com,yummy.tech,abite.com --keep-phones
-```
-
-`--pause-new-tabs` 会让新开的 tab 在 Network 监听启用后再继续加载，适合捕捉弹窗/新 tab 打开后的第一批接口。
-
-## 备选抓接口方式：导出 HAR
+备选方式是导出 HAR：
 
 1. 打开 Chrome，登录 `admin.cotticoffee.com`。
 2. 打开 DevTools -> Network，勾选 Preserve log，过滤 Fetch/XHR。
-3. 做一次招待券流程，但尽量先只做到查询、复制活动、填写字段；最终保存/上架/发放动作先用测试数据。
+3. 完整做一次人工流程，写入动作尽量使用测试数据。
 4. 右键 Network 请求列表，选择 `Save all as HAR with content`。
-5. 保存到 `captures/invite-ticket.har`。
-6. 对优惠券适用门店导入流程重复一次，保存到 `captures/coupon-scope.har`。
-
-分析 HAR：
+5. 保存到 `captures/`。
+6. 使用 CLI 分析：
 
 ```powershell
-python -m ticket_automation.cli analyze-har captures/invite-ticket.har --host admin.cotticoffee.com
-python -m ticket_automation.cli analyze-har captures/coupon-scope.har --host admin.cotticoffee.com
+python -m ticket_automation.cli analyze-har captures/new-flow.har --host admin.cotticoffee.com
 ```
 
-校验工单输入：
+### 5. 如何打包免安装版
 
-```powershell
-python -m ticket_automation.cli validate examples/work_orders.sample.json
-```
+开发机需要能访问 Python、PyInstaller 和 Node；同事的使用机只需要有 Chrome。
 
-## 本地 GUI 批量处理
+在 Codex 环境中，构建脚本会优先使用 Codex 自带的 Python 和 Node；在普通开发机上，需要提前安装 Python、PyInstaller 和 Node。
 
-第一版 GUI 支持把多条泛微工单混合粘贴到一个文本框里，自动拆分、分类并解析：
-
-```powershell
-.\run_app.ps1
-```
-
-点击 GUI 顶部的 `打开中台 Chrome` 会用工单专用 profile 和 `9223` 调试端口打开运营中台首页；登录这个窗口后再执行 dry-run。
-
-## 打包给同事使用
-
-Windows 打包产物会把 Python GUI 打成 exe，并把 Node 放到 exe 同目录的 `runtime\node.exe`。同事不需要安装 Python 或 Node，只需要电脑里有 Chrome。
-
-在开发机上构建：
+构建：
 
 ```powershell
 .\build_windows.ps1
 ```
 
-构建完成后，把这个 zip 发给同事：
+输出：
 
 ```text
+dist\TicketProcessingAutomation\
 dist\TicketProcessingAutomation.zip
 ```
 
-同事解压后双击 `launch.bat` 或 `TicketProcessingAutomation.exe`，再点 GUI 顶部的 `打开中台 Chrome` 登录中台。
+打包版会优先使用 exe 同目录下的：
 
-当前已接入：
-
-- 招待券发放：可解析、批量 dry-run、在 dry-run 明细表勾选后提交、提交后复查。
-- 优惠券发放：可解析、批量 dry-run、在 dry-run 明细表勾选后提交、提交后复查。
-- 未识别工单：在表格中标记为“暂不支持”，不影响其他工单处理。
-
-GUI 拆成两块表：上方“解析结果”只展示字段解析和分类；下方“dry-run 明细与提交勾选”展示门店校验、手机号导入、payload 拆分、退回批示语、提交后复查等明细。提交按钮只会提交下方表格里 `提交?` 列已勾选的“可提交”工单，并会弹窗二次确认。
-
-招待券固定格式工单可以直接由脚本解析并 dry-run：
-
-```powershell
-node scripts/invite-ticket-dry-run.mjs --work-order-file examples/invite_ticket_work_order.sample.txt --out tmp/invite-ticket-dry-run.json
+```text
+runtime\node.exe
 ```
 
-优惠券固定格式工单也可以直接 dry-run：
+运行数据会写入：
 
-```powershell
-node scripts/coupon-ticket-dry-run.mjs --work-order-file <优惠券工单.txt> --out tmp/coupon-ticket-dry-run.json
+```text
+%LOCALAPPDATA%\TicketProcessingAutomation
 ```
 
-如果门店名称和门店编号不一致，dry-run 会生成 fallback JSON，并在 `returnComment` 中返回泛微退回批示语：`门店名称和门店编号不一致，请重新填写`。
+### 6. 不建议提交的文件
 
-dry-run 会统一走“导入手机号”方式：脚本生成手机号 Excel、上传、查看导入结果，并校验导入总条数与手机号数量一致。它不会提交活动。
+以下文件由本地运行或打包生成，不应提交到 git：
 
-人工 review dry-run JSON 后，再显式提交：
+- `build/`
+- `dist/`
+- `tmp/`
+- `captures/`
+- `*.spec`
+- `*.log`
+- `*.har`
+
+### 7. 本地检查命令
+
+Python 语法检查：
 
 ```powershell
-node scripts/invite-ticket-submit.mjs --dry-run-file tmp/invite-ticket-dry-run.json --out tmp/invite-ticket-submit-result.json --confirm-submit
+python -m py_compile app_ui.py ticket_automation\batch_runner.py ticket_automation\models.py ticket_automation\pipelines\invite_ticket.py ticket_automation\pipelines\coupon_ticket.py ticket_automation\cli.py
 ```
 
-优惠券提交使用对应脚本：
+Node 脚本语法检查：
 
 ```powershell
-node scripts/coupon-ticket-submit.mjs --dry-run-file tmp/coupon-ticket-dry-run.json --out tmp/coupon-ticket-submit-result.json --confirm-submit
+node --check scripts/invite-ticket-dry-run.mjs
+node --check scripts/invite-ticket-submit.mjs
+node --check scripts/coupon-ticket-dry-run.mjs
+node --check scripts/coupon-ticket-submit.mjs
 ```
-
-提交结果 JSON 会包含中台保存接口返回值，以及只读复查结果 `results[].postCheck`，用于确认活动列表能查到新建活动 ID 和活动编号。
-
-发放数量规则：
-
-- 单个手机号发券数量不能超过 200。
-- 运营中台单次发券数量限制 100。
-- 数量 1-100 时提交一次。
-- 数量 101-200 时拆成两次提交，例如 150 拆成 100 和 50。
-
-## 下一步
-
-拿到 HAR 后，我们会把候选接口分成：
-
-- 查询类：模板搜索、门店搜索、活动搜索、活动详情。
-- 预览/导入类：手机号批量导入、适用门店外部导入。
-- 写入类：复制活动、保存活动、上架/发放、保存券模板适用门店。
-
-写入类会先实现 dry-run 输出 payload，再接真实执行。
-
-当前发现报告见 [docs/api-discovery.md](docs/api-discovery.md)。
