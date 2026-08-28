@@ -15,6 +15,8 @@ function parseArgs(argv) {
     dryRunFile: "tmp/invite-ticket-dry-run.json",
     out: "tmp/invite-ticket-submit-result.json",
     confirmSubmit: false,
+    busyRetryCount: Number(process.env.TICKET_AUTOMATION_BUSY_RETRY_COUNT || 3),
+    busyRetryDelayMs: Number(process.env.TICKET_AUTOMATION_BUSY_RETRY_DELAY_MS || 5000),
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -23,6 +25,8 @@ function parseArgs(argv) {
     else if (arg === "--dry-run-file") opts.dryRunFile = argv[++index];
     else if (arg === "--out") opts.out = argv[++index];
     else if (arg === "--confirm-submit") opts.confirmSubmit = true;
+    else if (arg === "--busy-retry-count") opts.busyRetryCount = Number(argv[++index]);
+    else if (arg === "--busy-retry-delay-ms") opts.busyRetryDelayMs = Number(argv[++index]);
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -33,6 +37,12 @@ function parseArgs(argv) {
 
   if (!opts.confirmSubmit) {
     throw new Error("Refusing to submit without --confirm-submit");
+  }
+  if (!Number.isInteger(opts.busyRetryCount) || opts.busyRetryCount < 0) {
+    throw new Error(`Invalid --busy-retry-count: ${opts.busyRetryCount}`);
+  }
+  if (!Number.isInteger(opts.busyRetryDelayMs) || opts.busyRetryDelayMs < 0) {
+    throw new Error(`Invalid --busy-retry-delay-ms: ${opts.busyRetryDelayMs}`);
   }
   return opts;
 }
@@ -45,6 +55,10 @@ Options:
   --cdp-url <url>       Chrome remote debugging URL. Default: http://127.0.0.1:9223
   --out <path>          Write submit result JSON. Default: tmp/invite-ticket-submit-result.json
   --confirm-submit      Required. Calls /manualActivity/djSave and then performs a read-only activity list post-check.
+  --busy-retry-count <n>
+                       Retry only the current failed payload when the backend says an activity is still running. Default: 3
+  --busy-retry-delay-ms <ms>
+                       Delay before each busy retry. Default: 5000
 `);
 }
 
@@ -209,6 +223,19 @@ async function evaluateRuntime(client, sessionId, expression, timeout = 30000) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function submitResponseMessage(result) {
+  const response = result?.response;
+  if (response && typeof response === "object") {
+    return String(response.msg || response.message || response.data || "");
+  }
+  return String(result?.responseText || "");
+}
+
+function isRunningActivityResponse(result) {
+  const responseStatus = result?.response?.status;
+  return responseStatus === -2 && submitResponseMessage(result).includes("正在执行");
 }
 
 async function waitForMarketingTarget(client, targetId) {
@@ -496,6 +523,39 @@ function runtimeExpression(payload, endpoint) {
 `;
 }
 
+async function submitPayloadWithBusyRetry(client, sessionId, payload, endpoint, opts) {
+  let latestResult = null;
+  const attempts = [];
+  const maxAttempts = opts.busyRetryCount + 1;
+
+  for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
+    if (attemptIndex > 0) await sleep(opts.busyRetryDelayMs);
+
+    latestResult = await evaluateRuntime(client, sessionId, runtimeExpression(payload, endpoint), 60000);
+    const busy = isRunningActivityResponse(latestResult);
+    attempts.push({
+      attempt: attemptIndex + 1,
+      waitedBeforeAttemptMs: attemptIndex > 0 ? opts.busyRetryDelayMs : 0,
+      busy,
+      httpStatus: latestResult?.status,
+      responseStatus: latestResult?.response?.status,
+      responseMessage: submitResponseMessage(latestResult),
+    });
+
+    if (!busy) break;
+  }
+
+  if (attempts.length > 1) {
+    latestResult.retryInfo = {
+      reason: "中台忙/发券任务未完成，已等待重试",
+      retryCount: attempts.length - 1,
+      retryDelayMs: opts.busyRetryDelayMs,
+      attempts,
+    };
+  }
+  return latestResult;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const dryRunPath = resolve(opts.dryRunFile);
@@ -511,7 +571,7 @@ async function main() {
     const { attach } = await resolveMarketingSession(client, targets.targetInfos);
     const results = [];
     for (const payload of payloads) {
-      const result = await evaluateRuntime(client, attach.sessionId, runtimeExpression(payload, dryRun.submitEndpoint), 60000);
+      const result = await submitPayloadWithBusyRetry(client, attach.sessionId, payload, dryRun.submitEndpoint, opts);
       results.push(result);
     }
 

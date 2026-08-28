@@ -32,6 +32,8 @@ function parseArgs(argv) {
     dryRunFile: "tmp/coupon-ticket-dry-run.json",
     out: "tmp/coupon-ticket-submit-result.json",
     confirmSubmit: false,
+    busyRetryCount: Number(process.env.TICKET_AUTOMATION_BUSY_RETRY_COUNT || 3),
+    busyRetryDelayMs: Number(process.env.TICKET_AUTOMATION_BUSY_RETRY_DELAY_MS || 5000),
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -39,6 +41,8 @@ function parseArgs(argv) {
     else if (arg === "--dry-run-file") opts.dryRunFile = argv[++index];
     else if (arg === "--out") opts.out = argv[++index];
     else if (arg === "--confirm-submit") opts.confirmSubmit = true;
+    else if (arg === "--busy-retry-count") opts.busyRetryCount = Number(argv[++index]);
+    else if (arg === "--busy-retry-delay-ms") opts.busyRetryDelayMs = Number(argv[++index]);
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -47,6 +51,12 @@ function parseArgs(argv) {
     }
   }
   if (!opts.confirmSubmit) throw new Error("Refusing to submit without --confirm-submit");
+  if (!Number.isInteger(opts.busyRetryCount) || opts.busyRetryCount < 0) {
+    throw new Error(`Invalid --busy-retry-count: ${opts.busyRetryCount}`);
+  }
+  if (!Number.isInteger(opts.busyRetryDelayMs) || opts.busyRetryDelayMs < 0) {
+    throw new Error(`Invalid --busy-retry-delay-ms: ${opts.busyRetryDelayMs}`);
+  }
   return opts;
 }
 
@@ -58,6 +68,10 @@ Options:
   --cdp-url <url>       Chrome remote debugging URL. Default: http://127.0.0.1:9223
   --out <path>          Write submit result JSON. Default: tmp/coupon-ticket-submit-result.json
   --confirm-submit      Required. Calls /manualActivity/djSave via the shared submit script.
+  --busy-retry-count <n>
+                       Retry only the current failed payload when the backend says an activity is still running. Default: 3
+  --busy-retry-delay-ms <ms>
+                       Delay before each busy retry. Default: 5000
 `);
 }
 
@@ -94,6 +108,10 @@ function main() {
       "--out",
       opts.out,
       "--confirm-submit",
+      "--busy-retry-count",
+      String(opts.busyRetryCount),
+      "--busy-retry-delay-ms",
+      String(opts.busyRetryDelayMs),
     ],
     { encoding: "utf8" },
   );

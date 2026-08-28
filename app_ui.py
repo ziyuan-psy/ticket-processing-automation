@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -364,17 +365,26 @@ class TicketAutomationApp:
             return
         if not messagebox.askyesno("确认提交", f"将真实提交 {len(targets)} 个已勾选工单，是否继续？"):
             return
-        self._run_background(targets, submit_ticket, f"正在提交 {len(targets)} 个工单...", "提交完成。")
+        self._run_background(targets, submit_ticket, f"正在提交 {len(targets)} 个工单...", "提交完成。", item_delay_seconds=2)
 
-    def _run_background(self, targets: list[ParsedTicket], action, start_message: str, done_message: str) -> None:
+    def _run_background(
+        self,
+        targets: list[ParsedTicket],
+        action,
+        start_message: str,
+        done_message: str,
+        item_delay_seconds: float = 0,
+    ) -> None:
         if self._busy:
             return
         self._set_busy(True, start_message)
 
         def worker() -> None:
             try:
-                for ticket in targets:
+                for index, ticket in enumerate(targets):
                     action(ticket)
+                    if item_delay_seconds and index < len(targets) - 1:
+                        time.sleep(item_delay_seconds)
             except Exception as error:  # noqa: BLE001 - GUI must recover and show the operator the failure.
                 self.root.after(0, lambda: self._finish_background(f"执行失败：{error}", error))
                 return

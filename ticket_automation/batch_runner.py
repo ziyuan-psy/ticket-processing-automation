@@ -200,6 +200,53 @@ def _friendly_error(text: str) -> str:
     return cleaned or "执行失败，但脚本没有返回错误文本。"
 
 
+def _submit_response_message(item: dict) -> str:
+    response = item.get("response")
+    if isinstance(response, dict):
+        for key in ("msg", "message", "data", "error"):
+            value = response.get(key)
+            if value:
+                return str(value)
+    return str(item.get("responseText") or item.get("statusText") or "")
+
+
+def _is_running_activity_error(item: dict) -> bool:
+    retry_info = item.get("retryInfo")
+    if isinstance(retry_info, dict) and "中台忙/发券任务未完成" in str(retry_info.get("reason", "")):
+        return True
+    response = item.get("response")
+    return isinstance(response, dict) and response.get("status") == -2 and "正在执行" in _submit_response_message(item)
+
+
+def _submit_retry_summary(results: list[dict]) -> str:
+    parts = []
+    for index, item in enumerate(results, start=1):
+        retry_info = item.get("retryInfo")
+        if not isinstance(retry_info, dict):
+            continue
+        response = item.get("response") if isinstance(item.get("response"), dict) else {}
+        final_ok = response.get("status") == 0
+        status = "成功" if final_ok else "仍失败"
+        parts.append(f"第{index}批中台忙后重试{retry_info.get('retryCount', 0)}次，最终{status}")
+    return "；".join(parts)
+
+
+def _summarize_submit_errors(results: list[dict]) -> list[str]:
+    errors = []
+    for index, item in enumerate(results, start=1):
+        response = item.get("response") if isinstance(item.get("response"), dict) else {}
+        if response.get("status") == 0:
+            continue
+        message = _submit_response_message(item) or "中台未返回明确错误原因"
+        if _is_running_activity_error(item):
+            retry_info = item.get("retryInfo") if isinstance(item.get("retryInfo"), dict) else {}
+            retry_count = retry_info.get("retryCount", 0)
+            errors.append(f"中台忙/发券任务未完成，已等待重试：第{index}批重试{retry_count}次后仍失败（{message}）")
+        else:
+            errors.append(f"第{index}批提交失败：{message}")
+    return errors or ["中台提交返回异常，请查看提交结果 JSON。"]
+
+
 def _dry_run_script_for(ticket: ParsedTicket) -> str | None:
     if ticket.ticket_type == INVITE_TICKET:
         return "scripts/invite-ticket-dry-run.mjs"
@@ -346,7 +393,10 @@ def submit_ticket(ticket: ParsedTicket) -> ParsedTicket:
     ticket.status = "submitted" if ok else "submit_error"
     ticket.fields["submit_results"] = results
     ticket.fields["post_checks"] = [item.get("postCheck") for item in results]
-    ticket.errors = [] if ok else ["中台提交返回异常，请查看提交结果 JSON。"]
+    retry_summary = _submit_retry_summary(results)
+    if retry_summary:
+        ticket.fields["submit_retry_summary"] = retry_summary
+    ticket.errors = [] if ok else _summarize_submit_errors(results)
     return ticket
 
 
